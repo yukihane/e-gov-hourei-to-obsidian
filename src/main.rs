@@ -77,6 +77,13 @@ impl ApiClient {
     }
 
     fn get_json(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        match self.get_json_maybe_404(path, query)? {
+            Some(v) => Ok(v),
+            None => bail!("APIエラー 404 Not Found {}{}", self.base_url, path),
+        }
+    }
+
+    fn get_json_maybe_404(&self, path: &str, query: &[(&str, &str)]) -> Result<Option<Value>> {
         let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
         let mut last_err: Option<anyhow::Error> = None;
 
@@ -89,13 +96,17 @@ impl ApiClient {
                         std::thread::sleep(Duration::from_millis(400 * (attempt + 1) as u64));
                         continue;
                     }
+                    if status == StatusCode::NOT_FOUND {
+                        return Ok(None);
+                    }
                     if !status.is_success() {
                         let body = resp.text().unwrap_or_else(|_| "<no body>".to_string());
                         return Err(anyhow!("APIエラー {} {}: {}", status, url, body));
                     }
-                    return resp
+                    let json = resp
                         .json::<Value>()
-                        .with_context(|| format!("JSON解析に失敗しました: {}", url));
+                        .with_context(|| format!("JSON解析に失敗しました: {}", url))?;
+                    return Ok(Some(json));
                 }
                 Err(e) => {
                     last_err = Some(anyhow!(e).context(format!("API呼び出し失敗: {}", url)));
@@ -112,23 +123,69 @@ impl ApiClient {
     }
 
     fn fetch_law_contents(&self, candidate: &LawCandidate) -> Result<LawContents> {
+        let mut attempted = Vec::new();
+
+        let try_query = |path: &str, key: &str, value: &str| -> Result<Option<LawContents>> {
+            if let Some(json) = self.get_json_maybe_404(path, &[(key, value)])? {
+                return Ok(Some(parse_law_contents(&json)?));
+            }
+            Ok(None)
+        };
+        let try_path = |path: &str| -> Result<Option<LawContents>> {
+            if let Some(json) = self.get_json_maybe_404(path, &[])? {
+                return Ok(Some(parse_law_contents(&json)?));
+            }
+            Ok(None)
+        };
+
         if let Some(law_id) = candidate.law_id.as_deref() {
-            let json = self.get_json("/api/2/law_contents", &[("law_id", law_id)])?;
-            if let Ok(contents) = parse_law_contents(&json) {
-                return Ok(contents);
+            for path in [
+                "/api/2/law_contents",
+                "/api/2/law-contents",
+                "/api/2/law_data",
+            ] {
+                attempted.push(format!("{}?law_id={}", path, law_id));
+                if let Some(contents) = try_query(path, "law_id", law_id)? {
+                    return Ok(contents);
+                }
+            }
+            for path in [
+                format!("/api/2/law_contents/{}", law_id),
+                format!("/api/2/law-contents/{}", law_id),
+                format!("/api/2/law_data/{}", law_id),
+            ] {
+                attempted.push(path.clone());
+                if let Some(contents) = try_path(&path)? {
+                    return Ok(contents);
+                }
             }
         }
         if let Some(law_num) = candidate.law_num.as_deref() {
-            let json = self.get_json("/api/2/law_contents", &[("law_num", law_num)])?;
-            if let Ok(contents) = parse_law_contents(&json) {
+            for path in [
+                "/api/2/law_contents",
+                "/api/2/law-contents",
+                "/api/2/law_data",
+            ] {
+                attempted.push(format!("{}?law_num={}", path, law_num));
+                if let Some(contents) = try_query(path, "law_num", law_num)? {
+                    return Ok(contents);
+                }
+            }
+        }
+        for path in [
+            "/api/2/law_contents",
+            "/api/2/law-contents",
+            "/api/2/law_data",
+        ] {
+            attempted.push(format!("{}?law_title={}", path, candidate.law_title));
+            if let Some(contents) = try_query(path, "law_title", &candidate.law_title)? {
                 return Ok(contents);
             }
         }
-        let json = self.get_json(
-            "/api/2/law_contents",
-            &[("law_title", &candidate.law_title)],
-        )?;
-        parse_law_contents(&json)
+        bail!(
+            "本文取得APIが見つかりませんでした。試行: {}",
+            attempted.join(", ")
+        )
     }
 }
 
