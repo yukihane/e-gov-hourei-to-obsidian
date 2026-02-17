@@ -13,6 +13,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// コマンドライン引数定義。
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 struct Cli {
@@ -29,6 +30,7 @@ struct Cli {
     non_interactive: bool,
 }
 
+/// 法令検索結果から利用する最小単位の候補情報。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LawCandidate {
     law_id: Option<String>,
@@ -37,27 +39,66 @@ struct LawCandidate {
     promulgation_date: Option<String>,
 }
 
+/// 取得した法令本文をノート生成向けに正規化したデータ。
 #[derive(Debug, Clone)]
 struct LawContents {
     law_id: Option<String>,
     law_num: Option<String>,
     law_title: String,
-    rendered_markdown: String,
+    markdown: String,
     original_xml: Option<String>,
 }
 
+/// `/laws` エンドポイントのレスポンス。
+#[derive(Debug, Clone, Deserialize)]
+struct LawsResponse {
+    laws: Vec<LawsResponseLaw>,
+}
+
+/// `/laws` の1件分データ。
+#[derive(Debug, Clone, Deserialize)]
+struct LawsResponseLaw {
+    law_info: LawsLawInfo,
+    revision_info: LawsRevisionInfo,
+}
+
+/// 改正履歴に依存しない法令情報。
+#[derive(Debug, Clone, Deserialize)]
+struct LawsLawInfo {
+    law_id: String,
+    law_num: Option<String>,
+    promulgation_date: Option<String>,
+}
+
+/// 改正履歴に依存する法令情報。
+#[derive(Debug, Clone, Deserialize)]
+struct LawsRevisionInfo {
+    law_title: String,
+}
+
+/// `/law_data/{law_id_or_num_or_revision_id}` のレスポンス。
+#[derive(Debug, Clone, Deserialize)]
+struct LawDataResponse {
+    law_info: LawsLawInfo,
+    revision_info: LawsRevisionInfo,
+    law_full_text: Value,
+}
+
+/// 本文中の他法令参照（再帰取得キュー用）。
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct LawRef {
     law_title: String,
     article: String,
 }
 
+/// 自動解決できなかった相対参照。
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct UnresolvedRef {
     source_law: String,
     raw_text: String,
 }
 
+/// e-Gov法令API v2 クライアント。
 #[derive(Debug)]
 struct ApiClient {
     client: Client,
@@ -65,6 +106,7 @@ struct ApiClient {
 }
 
 impl ApiClient {
+    /// APIクライアントを初期化する。
     fn new(base_url: String) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -76,17 +118,12 @@ impl ApiClient {
         })
     }
 
+    /// 指定パスへGETし、JSONレスポンスを返す。
     fn get_json(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        match self.get_json_maybe_404(path, query)? {
-            Some(v) => Ok(v),
-            None => bail!("APIエラー 404 Not Found {}{}", self.base_url, path),
-        }
-    }
-
-    fn get_json_maybe_404(&self, path: &str, query: &[(&str, &str)]) -> Result<Option<Value>> {
         let url = format!("{}/{}", self.base_url, path.trim_start_matches('/'));
         let mut last_err: Option<anyhow::Error> = None;
 
+        // 一時的障害（5xx, 429）を吸収するため軽いリトライを行う。
         for attempt in 0..3 {
             let res = self.client.get(&url).query(query).send();
             match res {
@@ -96,17 +133,13 @@ impl ApiClient {
                         std::thread::sleep(Duration::from_millis(400 * (attempt + 1) as u64));
                         continue;
                     }
-                    if status == StatusCode::NOT_FOUND {
-                        return Ok(None);
-                    }
                     if !status.is_success() {
                         let body = resp.text().unwrap_or_else(|_| "<no body>".to_string());
                         return Err(anyhow!("APIエラー {} {}: {}", status, url, body));
                     }
-                    let json = resp
+                    return resp
                         .json::<Value>()
-                        .with_context(|| format!("JSON解析に失敗しました: {}", url))?;
-                    return Ok(Some(json));
+                        .with_context(|| format!("JSON解析に失敗しました: {}", url));
                 }
                 Err(e) => {
                     last_err = Some(anyhow!(e).context(format!("API呼び出し失敗: {}", url)));
@@ -117,78 +150,36 @@ impl ApiClient {
         Err(last_err.unwrap_or_else(|| anyhow!("API呼び出しに失敗しました: {}", url)))
     }
 
+    /// 法令名で候補一覧を取得する。
     fn search_laws(&self, law_title: &str) -> Result<Vec<LawCandidate>> {
         let json = self.get_json("/api/2/laws", &[("law_title", law_title)])?;
-        parse_law_candidates(&json)
+        let parsed: LawsResponse =
+            serde_json::from_value(json).context("法令一覧レスポンスの型変換に失敗しました")?;
+        parse_law_candidates(parsed)
     }
 
+    /// 法令IDまたは法令番号で本文を取得する。
     fn fetch_law_contents(&self, candidate: &LawCandidate) -> Result<LawContents> {
-        let mut attempted = Vec::new();
-
-        let try_query = |path: &str, key: &str, value: &str| -> Result<Option<LawContents>> {
-            if let Some(json) = self.get_json_maybe_404(path, &[(key, value)])? {
-                return Ok(Some(parse_law_contents(&json)?));
-            }
-            Ok(None)
-        };
-        let try_path = |path: &str| -> Result<Option<LawContents>> {
-            if let Some(json) = self.get_json_maybe_404(path, &[])? {
-                return Ok(Some(parse_law_contents(&json)?));
-            }
-            Ok(None)
-        };
-
-        if let Some(law_id) = candidate.law_id.as_deref() {
-            for path in [
-                "/api/2/law_contents",
-                "/api/2/law-contents",
-                "/api/2/law_data",
-            ] {
-                attempted.push(format!("{}?law_id={}", path, law_id));
-                if let Some(contents) = try_query(path, "law_id", law_id)? {
-                    return Ok(contents);
-                }
-            }
-            for path in [
-                format!("/api/2/law_contents/{}", law_id),
-                format!("/api/2/law-contents/{}", law_id),
-                format!("/api/2/law_data/{}", law_id),
-            ] {
-                attempted.push(path.clone());
-                if let Some(contents) = try_path(&path)? {
-                    return Ok(contents);
-                }
-            }
-        }
-        if let Some(law_num) = candidate.law_num.as_deref() {
-            for path in [
-                "/api/2/law_contents",
-                "/api/2/law-contents",
-                "/api/2/law_data",
-            ] {
-                attempted.push(format!("{}?law_num={}", path, law_num));
-                if let Some(contents) = try_query(path, "law_num", law_num)? {
-                    return Ok(contents);
-                }
-            }
-        }
-        for path in [
-            "/api/2/law_contents",
-            "/api/2/law-contents",
-            "/api/2/law_data",
-        ] {
-            attempted.push(format!("{}?law_title={}", path, candidate.law_title));
-            if let Some(contents) = try_query(path, "law_title", &candidate.law_title)? {
-                return Ok(contents);
-            }
-        }
-        bail!(
-            "本文取得APIが見つかりませんでした。試行: {}",
-            attempted.join(", ")
-        )
+        let id_or_num = candidate
+            .law_id
+            .as_deref()
+            .or(candidate.law_num.as_deref())
+            .ok_or_else(|| anyhow!("law_id/law_num がありません"))?;
+        let path = format!("/api/2/law_data/{}", id_or_num);
+        let json = self.get_json(
+            &path,
+            &[
+                ("response_format", "json"),
+                ("law_full_text_format", "json"),
+            ],
+        )?;
+        let parsed: LawDataResponse =
+            serde_json::from_value(json).context("法令本文レスポンスの型変換に失敗しました")?;
+        parse_law_contents(parsed)
     }
 }
 
+/// 取得・変換・出力の全体処理を担う実行器。
 #[derive(Debug)]
 struct Processor {
     api: ApiClient,
@@ -200,6 +191,7 @@ struct Processor {
 }
 
 impl Processor {
+    /// 指定法令名から再帰取得を実行し、ノートを生成する。
     fn run(&mut self, root_title: &str) -> Result<()> {
         fs::create_dir_all(&self.output_dir).with_context(|| {
             format!("出力ディレクトリ作成に失敗: {}", self.output_dir.display())
@@ -227,7 +219,7 @@ impl Processor {
             let contents = self.api.fetch_law_contents(&candidate)?;
             self.write_law_note(&contents, depth)?;
 
-            let refs = extract_external_references(&contents.rendered_markdown)?;
+            let refs = extract_external_references(&contents.markdown)?;
             for law_ref in refs {
                 queue.push_back((law_ref.law_title, depth + 1));
             }
@@ -242,6 +234,7 @@ impl Processor {
         Ok(())
     }
 
+    /// 候補が複数ある場合は対話選択して1件に確定する。
     fn resolve_candidate(&self, title: &str) -> Result<LawCandidate> {
         let mut candidates = self.api.search_laws(title)?;
         if candidates.is_empty() {
@@ -290,6 +283,7 @@ impl Processor {
         Ok(candidates.remove(idx - 1))
     }
 
+    /// 1法令分のMarkdownノートを書き出す。
     fn write_law_note(&mut self, law: &LawContents, depth: usize) -> Result<String> {
         let file_name = sanitize_filename(&law.law_title);
         let path = self.output_dir.join(format!("{}.md", file_name));
@@ -297,7 +291,7 @@ impl Processor {
             bail!("既存ファイルがあるためスキップ: {}", path.display());
         }
 
-        let base_markdown = ensure_article_headings(&law.rendered_markdown)?;
+        let base_markdown = ensure_article_headings(&law.markdown)?;
         let (markdown, unresolved) =
             linkify_markdown(&base_markdown, &law.law_title, &self.output_dir)?;
         self.unresolved_refs
@@ -322,32 +316,20 @@ impl Processor {
     }
 }
 
-fn parse_law_candidates(v: &Value) -> Result<Vec<LawCandidate>> {
-    let arr =
-        find_candidate_array(v).ok_or_else(|| anyhow!("法令候補の配列が見つかりませんでした"))?;
+/// `/laws` レスポンスを内部候補型へ変換する。
+fn parse_law_candidates(v: LawsResponse) -> Result<Vec<LawCandidate>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for item in arr {
-        let law_title = find_str_recursive(item, &["law_title", "lawTitle", "title", "name"])
-            .map(ToString::to_string);
-        let law_num = find_str_recursive(item, &["law_num", "lawNum", "number", "lawNo"])
-            .map(ToString::to_string);
-        let law_id =
-            find_str_recursive(item, &["law_id", "lawId", "law_info_id", "lawInfoId", "id"])
-                .map(ToString::to_string);
-        let promulgation_date = find_str_recursive(
-            item,
-            &["promulgation_date", "promulgationDate", "date_promulgation"],
-        )
-        .map(ToString::to_string);
-        let Some(law_title) = law_title else {
-            continue;
-        };
+    for item in v.laws {
+        let law_id = Some(item.law_info.law_id);
+        let law_num = item.law_info.law_num;
+        let law_title = item.revision_info.law_title;
+        let promulgation_date = item.law_info.promulgation_date;
         let key = format!(
             "{}|{}|{}",
             law_id.clone().unwrap_or_default(),
             law_num.clone().unwrap_or_default(),
-            law_title
+            &law_title
         );
         if seen.insert(key) {
             out.push(LawCandidate {
@@ -364,109 +346,20 @@ fn parse_law_candidates(v: &Value) -> Result<Vec<LawCandidate>> {
     Ok(out)
 }
 
-fn parse_law_contents(v: &Value) -> Result<LawContents> {
-    let data = pick_obj(v, &["law_contents", "result", "data"]).unwrap_or(v);
-    let law_id = find_str_recursive(data, &["law_id", "lawId", "law_info_id", "lawInfoId", "id"])
-        .map(ToString::to_string);
-    let law_num = find_str_recursive(data, &["law_num", "lawNum", "number", "lawNo"])
-        .map(ToString::to_string);
-    let law_title = find_str_recursive(data, &["law_title", "lawTitle", "title", "name"])
-        .ok_or_else(|| anyhow!("law_title がありません"))?
-        .to_string();
-    let rendered_markdown = find_str_recursive(
-        data,
-        &[
-            "rendered_markdown",
-            "renderedMarkdown",
-            "markdown",
-            "rendered_law",
-        ],
-    )
-    .ok_or_else(|| anyhow!("rendered_markdown がありません"))?
-    .to_string();
-    let original_xml =
-        find_str_recursive(data, &["original_xml", "originalXml", "xml"]).map(ToString::to_string);
+/// `/law_data` レスポンスを内部本文型へ変換する。
+fn parse_law_contents(v: LawDataResponse) -> Result<LawContents> {
+    let markdown = law_full_text_json_to_markdown(&v.law_full_text)?;
 
     Ok(LawContents {
-        law_id,
-        law_num,
-        law_title,
-        rendered_markdown,
-        original_xml,
+        law_id: Some(v.law_info.law_id),
+        law_num: v.law_info.law_num,
+        law_title: v.revision_info.law_title,
+        markdown,
+        original_xml: None,
     })
 }
 
-fn pick_array<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
-    keys.iter()
-        .find_map(|k| v.get(*k))
-        .and_then(|x| x.as_array())
-        .or_else(|| v.as_array())
-}
-
-fn pick_obj<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a Value> {
-    keys.iter().find_map(|k| v.get(*k)).or_else(|| Some(v))
-}
-
-fn pick_str<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    for key in keys {
-        if let Some(s) = v.get(*key).and_then(|x| x.as_str()) {
-            return Some(s);
-        }
-    }
-    None
-}
-
-fn find_str_recursive<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    if let Some(s) = pick_str(v, keys) {
-        return Some(s);
-    }
-    match v {
-        Value::Object(map) => {
-            for child in map.values() {
-                if let Some(s) = find_str_recursive(child, keys) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        Value::Array(arr) => {
-            for child in arr {
-                if let Some(s) = find_str_recursive(child, keys) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn find_candidate_array(v: &Value) -> Option<&Vec<Value>> {
-    if let Some(arr) = pick_array(v, &["laws", "results", "data", "items"]) {
-        if !arr.is_empty() {
-            return Some(arr);
-        }
-    }
-    match v {
-        Value::Object(map) => {
-            for child in map.values() {
-                if let Some(arr) = find_candidate_array(child) {
-                    return Some(arr);
-                }
-            }
-            None
-        }
-        Value::Array(arr) => {
-            if arr.iter().any(|x| x.is_object()) {
-                Some(arr)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
+/// ノート名として使えない文字を安全な文字へ置換する。
 fn sanitize_filename(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -479,10 +372,87 @@ fn sanitize_filename(s: &str) -> String {
     out.trim().trim_end_matches('.').to_string()
 }
 
+/// YAML文字列として安全に埋め込める形へエスケープする。
 fn escape_yaml(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// `law_full_text`（JSON木）から読みやすいテキストを抽出する。
+fn law_full_text_json_to_markdown(v: &Value) -> Result<String> {
+    let mut out = String::new();
+    append_law_text(v, &mut out);
+
+    let ws_re = Regex::new(r"[ \t]+").context("空白正規表現の初期化に失敗")?;
+    let mut text = ws_re.replace_all(&out, " ").to_string();
+    let nl_re = Regex::new(r"\n{3,}").context("改行正規表現の初期化に失敗")?;
+    text = nl_re.replace_all(&text, "\n\n").to_string();
+
+    let text = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        bail!("law_full_text から本文テキストを抽出できませんでした")
+    }
+    Ok(text)
+}
+
+/// `law_full_text` の再帰木を走査し、文字列を連結する。
+fn append_law_text(v: &Value, out: &mut String) {
+    // 条文構造に対応するタグ前後で改行を入れ、可読性を確保する。
+    match v {
+        Value::String(s) => {
+            out.push_str(s);
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                append_law_text(item, out);
+            }
+        }
+        Value::Object(map) => {
+            let tag = map.get("tag").and_then(Value::as_str).unwrap_or("");
+            let is_block = matches!(
+                tag,
+                "Law"
+                    | "LawBody"
+                    | "MainProvision"
+                    | "Part"
+                    | "Chapter"
+                    | "Section"
+                    | "Subsection"
+                    | "Division"
+                    | "Article"
+                    | "Paragraph"
+                    | "Item"
+                    | "Subitem"
+                    | "SupplProvision"
+                    | "AppdxTable"
+                    | "AppdxNote"
+                    | "AppdxStyle"
+                    | "Appdx"
+            );
+            if is_block && !out.ends_with('\n') {
+                out.push('\n');
+            }
+
+            if let Some(children) = map.get("children") {
+                append_law_text(children, out);
+            } else {
+                for val in map.values() {
+                    append_law_text(val, out);
+                }
+            }
+            if is_block && !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 「第X条」行に見出しを補い、Obsidianアンカー解決しやすくする。
 fn ensure_article_headings(markdown: &str) -> Result<String> {
     let article_re = Regex::new(
         r"(?m)^(第[0-9一二三四五六七八九十百千〇]+条(?:の[0-9一二三四五六七八九十百千〇]+)?)",
@@ -513,6 +483,7 @@ fn ensure_article_headings(markdown: &str) -> Result<String> {
     Ok(out)
 }
 
+/// 他法令参照（○○法第X条）を抽出して再帰取得候補を作る。
 fn extract_external_references(markdown: &str) -> Result<HashSet<LawRef>> {
     let ref_re = Regex::new(
         r"(?P<law>[ぁ-んァ-ヶー一-龥A-Za-z0-9・（）()「」『』]+?法)第(?P<article>[0-9一二三四五六七八九十百千〇]+)条",
@@ -529,6 +500,7 @@ fn extract_external_references(markdown: &str) -> Result<HashSet<LawRef>> {
     Ok(out)
 }
 
+/// 本文中の条・項・号参照をObsidian Wikiリンクへ変換する。
 fn linkify_markdown(
     markdown: &str,
     current_law_title: &str,
@@ -642,6 +614,7 @@ fn linkify_markdown(
     Ok((output, unresolved))
 }
 
+/// 出力ディレクトリをObsidianリンク用の相対ディレクトリ文字列へ正規化する。
 fn obsidian_dir(output_dir: &Path) -> String {
     let mut s = output_dir.to_string_lossy().replace('\\', "/");
     if s == "." {
@@ -653,6 +626,7 @@ fn obsidian_dir(output_dir: &Path) -> String {
     s.trim_matches('/').to_string()
 }
 
+/// 法令名から `dir/filename` 形式のリンク先を作る。
 fn obsidian_note_target(dir: &str, law_title: &str) -> String {
     let file = sanitize_filename(law_title);
     if dir.is_empty() {
@@ -662,16 +636,18 @@ fn obsidian_note_target(dir: &str, law_title: &str) -> String {
     }
 }
 
+/// 見出し行から `第X条` のアンカー名を抽出する。
 fn extract_heading_anchor(line: &str) -> Option<String> {
     let s = line.trim_start_matches('#').trim();
     if s.starts_with('第') && s.contains('条') {
         let end = s.find('条')?;
-        Some(s[..=end].to_string())
+        Some(s[..end + '条'.len_utf8()].to_string())
     } else {
         None
     }
 }
 
+/// エントリーポイント。
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let api = ApiClient::new(cli.api_base_url)?;
@@ -688,6 +664,7 @@ fn main() -> Result<()> {
 }
 
 impl LawCandidate {
+    /// 訪問済み判定用の一意キーを返す。
     fn identity_key(&self) -> String {
         if let Some(id) = &self.law_id {
             return format!("id:{}", id);
@@ -698,6 +675,7 @@ impl LawCandidate {
         format!("title:{}", self.law_title)
     }
 
+    /// ログ表示用の識別子（主に法令ID）を返す。
     fn id_display(&self) -> &str {
         self.law_id.as_deref().unwrap_or("-")
     }
@@ -707,11 +685,13 @@ impl LawCandidate {
 mod tests {
     use super::*;
 
+    /// ファイル名禁止文字が置換されることを確認する。
     #[test]
     fn sanitize_filename_replaces_forbidden_chars() {
         assert_eq!(sanitize_filename("民法/商法:テスト"), "民法_商法_テスト");
     }
 
+    /// 同一法令・他法令の条文リンク化が機能することを確認する。
     #[test]
     fn linkify_handles_external_and_internal_articles() {
         let md = "民法第2条及び第3条を参照する。";
@@ -719,5 +699,50 @@ mod tests {
         assert!(out.contains("[[laws/民法#第2条|民法第2条]]"));
         assert!(out.contains("[[laws/刑法#第3条|第3条]]"));
         assert!(unresolved.is_empty());
+    }
+
+    /// `law_full_text` JSON木から本文テキストを抽出できることを確認する。
+    #[test]
+    fn law_full_text_json_to_markdown_extracts_text() {
+        let json = serde_json::json!({
+            "tag": "Law",
+            "children": [{
+                "tag": "Article",
+                "children": [
+                    {"tag":"ArticleTitle","children":["第一条"]},
+                    {"tag":"Paragraph","children":[{"tag":"Sentence","children":["この法律は、テストとする。"]}]}
+                ]
+            }]
+        });
+        let out = law_full_text_json_to_markdown(&json).unwrap();
+        assert!(out.contains("第一条"));
+        assert!(out.contains("この法律は、テストとする。"));
+    }
+
+    /// 実レスポンスの `/laws` フィクスチャを型変換できることを確認する。
+    #[test]
+    fn parse_laws_response_from_fixture() {
+        let raw = include_str!("../tests/fixtures/laws_tokkyoho.json");
+        let resp: LawsResponse = serde_json::from_str(raw).unwrap();
+        let candidates = parse_law_candidates(resp).unwrap();
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().any(|c| c.law_title == "特許法"));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.law_id.as_deref() == Some("334AC0000000121"))
+        );
+    }
+
+    /// 実レスポンスの `/law_data` フィクスチャを本文へ変換できることを確認する。
+    #[test]
+    fn parse_law_data_response_from_fixture() {
+        let raw = include_str!("../tests/fixtures/law_data_tokkyoho.json");
+        let resp: LawDataResponse = serde_json::from_str(raw).unwrap();
+        let contents = parse_law_contents(resp).unwrap();
+        assert_eq!(contents.law_id.as_deref(), Some("334AC0000000121"));
+        assert_eq!(contents.law_title, "特許法");
+        assert!(contents.markdown.contains("第一条"));
+        assert!(contents.markdown.contains("この法律は"));
     }
 }
