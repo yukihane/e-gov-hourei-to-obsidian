@@ -1,1 +1,1 @@
-法令API公式サイトのトップページは https://laws.e-gov.go.jp/apitop/ です。
+法令API: https://laws.e-gov.go.jp/api/2/swagger-ui/
