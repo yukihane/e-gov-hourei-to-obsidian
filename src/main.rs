@@ -242,6 +242,7 @@ struct Processor {
     dictionary: LawNameDictionary,
     dictionary_dirty: bool,
     unresolved_refs: Vec<UnresolvedRef>,
+    failed_resolution_titles: HashSet<String>,
 }
 
 impl Processor {
@@ -259,12 +260,25 @@ impl Processor {
             if depth > self.max_depth {
                 continue;
             }
+            if depth > 0 && self.failed_resolution_titles.contains(&title) {
+                eprintln!(
+                    "警告: 参照先法令の解決は同一実行中に既に失敗しているため再試行せずスキップ: {}",
+                    title
+                );
+                self.unresolved_refs.push(UnresolvedRef {
+                    source_law: source_law.clone(),
+                    alias: title.clone(),
+                    sample_context: Some("同一実行内で再出現した未解決参照".to_string()),
+                });
+                continue;
+            }
             let candidate = match self.resolve_candidate(&title) {
                 Ok(c) => c,
                 Err(e) => {
                     if depth == 0 {
                         return Err(e);
                     }
+                    self.failed_resolution_titles.insert(title.clone());
                     self.unresolved_refs.push(UnresolvedRef {
                         source_law: source_law.clone(),
                         alias: title.clone(),
@@ -1098,6 +1112,7 @@ fn main() -> Result<()> {
         dictionary,
         dictionary_dirty: false,
         unresolved_refs: Vec::new(),
+        failed_resolution_titles: HashSet::new(),
     };
 
     processor.run(law_title)
