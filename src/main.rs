@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -618,7 +619,44 @@ fn sanitize_filename(s: &str) -> String {
             out.push(ch);
         }
     }
-    out.trim().trim_end_matches('.').to_string()
+    let out = out.trim().trim_end_matches('.').to_string();
+    if out.is_empty() {
+        return "law".to_string();
+    }
+
+    // ext4等の一般的なファイル名上限(255byte)を考慮し、余裕を持って制限する。
+    const MAX_FILENAME_BYTES: usize = 180;
+    if out.len() <= MAX_FILENAME_BYTES {
+        return out;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    out.hash(&mut hasher);
+    let digest = hasher.finish();
+    let suffix = format!("_{:016x}", digest);
+
+    let head_max = MAX_FILENAME_BYTES.saturating_sub(suffix.len());
+    let mut head = truncate_utf8_by_bytes(&out, head_max).trim_end_matches('_').to_string();
+    if head.is_empty() {
+        head = "law".to_string();
+    }
+    format!("{}{}", head, suffix)
+}
+
+/// UTF-8境界を壊さないように先頭Nバイト以内で切り詰める。
+fn truncate_utf8_by_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut cut = 0usize;
+    for (idx, ch) in s.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        cut = next;
+    }
+    &s[..cut]
 }
 
 /// YAML文字列として安全に埋め込める形へエスケープする。
@@ -1091,6 +1129,15 @@ mod tests {
     #[test]
     fn sanitize_filename_replaces_forbidden_chars() {
         assert_eq!(sanitize_filename("民法/商法:テスト"), "民法_商法_テスト");
+    }
+
+    /// 長すぎるファイル名が安全に短縮されることを確認する。
+    #[test]
+    fn sanitize_filename_shortens_long_name() {
+        let long = "あ".repeat(400);
+        let name = sanitize_filename(&long);
+        assert!(name.len() <= 180);
+        assert!(name.contains('_'));
     }
 
     /// 同一法令・他法令の条文リンク化が機能することを確認する。
