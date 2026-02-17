@@ -205,7 +205,16 @@ impl Processor {
             if depth > self.max_depth {
                 continue;
             }
-            let candidate = self.resolve_candidate(&title)?;
+            let candidate = match self.resolve_candidate(&title) {
+                Ok(c) => c,
+                Err(e) => {
+                    if depth == 0 {
+                        return Err(e);
+                    }
+                    eprintln!("警告: 参照先法令の解決に失敗したためスキップ: {} ({})", title, e);
+                    continue;
+                }
+            };
             let visit_key = candidate.identity_key();
             if !visited.insert(visit_key) {
                 continue;
@@ -339,9 +348,6 @@ fn parse_law_candidates(v: LawsResponse) -> Result<Vec<LawCandidate>> {
                 promulgation_date,
             });
         }
-    }
-    if out.is_empty() {
-        bail!("法令候補を抽出できませんでした");
     }
     Ok(out)
 }
