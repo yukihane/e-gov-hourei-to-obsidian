@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LawCandidate {
-    law_id: String,
+    law_id: Option<String>,
     law_num: Option<String>,
     law_title: String,
     promulgation_date: Option<String>,
@@ -39,7 +39,7 @@ struct LawCandidate {
 
 #[derive(Debug, Clone)]
 struct LawContents {
-    law_id: String,
+    law_id: Option<String>,
     law_num: Option<String>,
     law_title: String,
     rendered_markdown: String,
@@ -111,8 +111,23 @@ impl ApiClient {
         parse_law_candidates(&json)
     }
 
-    fn fetch_law_contents(&self, law_id: &str) -> Result<LawContents> {
-        let json = self.get_json("/api/2/law_contents", &[("law_id", law_id)])?;
+    fn fetch_law_contents(&self, candidate: &LawCandidate) -> Result<LawContents> {
+        if let Some(law_id) = candidate.law_id.as_deref() {
+            let json = self.get_json("/api/2/law_contents", &[("law_id", law_id)])?;
+            if let Ok(contents) = parse_law_contents(&json) {
+                return Ok(contents);
+            }
+        }
+        if let Some(law_num) = candidate.law_num.as_deref() {
+            let json = self.get_json("/api/2/law_contents", &[("law_num", law_num)])?;
+            if let Ok(contents) = parse_law_contents(&json) {
+                return Ok(contents);
+            }
+        }
+        let json = self.get_json(
+            "/api/2/law_contents",
+            &[("law_title", &candidate.law_title)],
+        )?;
         parse_law_contents(&json)
     }
 }
@@ -124,8 +139,6 @@ struct Processor {
     max_depth: usize,
     no_overwrite: bool,
     non_interactive: bool,
-    file_by_law_id: HashMap<String, String>,
-    title_by_law_id: HashMap<String, String>,
     unresolved_refs: HashSet<UnresolvedRef>,
 }
 
@@ -144,17 +157,18 @@ impl Processor {
                 continue;
             }
             let candidate = self.resolve_candidate(&title)?;
-            if !visited.insert(candidate.law_id.clone()) {
+            let visit_key = candidate.identity_key();
+            if !visited.insert(visit_key) {
                 continue;
             }
 
-            eprintln!("取得中: {} ({})", candidate.law_title, candidate.law_id);
-            let contents = self.api.fetch_law_contents(&candidate.law_id)?;
-            let file_name = self.write_law_note(&contents, depth)?;
-            self.file_by_law_id
-                .insert(contents.law_id.clone(), file_name.clone());
-            self.title_by_law_id
-                .insert(contents.law_id.clone(), contents.law_title.clone());
+            eprintln!(
+                "取得中: {} ({})",
+                candidate.law_title,
+                candidate.id_display()
+            );
+            let contents = self.api.fetch_law_contents(&candidate)?;
+            self.write_law_note(&contents, depth)?;
 
             let refs = extract_external_references(&contents.rendered_markdown)?;
             for law_ref in refs {
@@ -198,9 +212,10 @@ impl Processor {
         println!("複数候補が見つかりました: {}", title);
         for (i, c) in candidates.iter().enumerate() {
             println!(
-                "{}. {} / {} / {}",
+                "{}. {} / {} / {} / {}",
                 i + 1,
                 c.law_title,
+                c.id_display(),
                 c.law_num.as_deref().unwrap_or("-"),
                 c.promulgation_date.as_deref().unwrap_or("-")
             );
@@ -237,7 +252,7 @@ impl Processor {
         let frontmatter = format!(
             "---\nlaw_title: \"{}\"\nlaw_id: \"{}\"\nlaw_num: \"{}\"\nsource_api: \"v2\"\nfetched_at: \"{}\"\ndepth: {}\nhas_original_xml: {}\n---\n\n",
             escape_yaml(&law.law_title),
-            escape_yaml(&law.law_id),
+            escape_yaml(law.law_id.as_deref().unwrap_or("")),
             escape_yaml(law.law_num.as_deref().unwrap_or("")),
             Utc::now().to_rfc3339(),
             depth,
@@ -251,46 +266,69 @@ impl Processor {
 }
 
 fn parse_law_candidates(v: &Value) -> Result<Vec<LawCandidate>> {
-    let arr = pick_array(v, &["laws", "results", "data"])
-        .ok_or_else(|| anyhow!("法令候補の配列が見つかりませんでした"))?;
+    let arr =
+        find_candidate_array(v).ok_or_else(|| anyhow!("法令候補の配列が見つかりませんでした"))?;
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for item in arr {
-        let law_id = pick_str(item, &["law_id", "lawId", "id"])
-            .ok_or_else(|| anyhow!("law_id がありません"))?
-            .to_string();
-        let law_title = pick_str(item, &["law_title", "lawTitle", "title", "name"])
-            .ok_or_else(|| anyhow!("law_title がありません"))?
-            .to_string();
-        let law_num = pick_str(item, &["law_num", "lawNum", "number"]).map(ToString::to_string);
-        let promulgation_date = pick_str(
+        let law_title = find_str_recursive(item, &["law_title", "lawTitle", "title", "name"])
+            .map(ToString::to_string);
+        let law_num = find_str_recursive(item, &["law_num", "lawNum", "number", "lawNo"])
+            .map(ToString::to_string);
+        let law_id =
+            find_str_recursive(item, &["law_id", "lawId", "law_info_id", "lawInfoId", "id"])
+                .map(ToString::to_string);
+        let promulgation_date = find_str_recursive(
             item,
             &["promulgation_date", "promulgationDate", "date_promulgation"],
         )
         .map(ToString::to_string);
-        out.push(LawCandidate {
-            law_id,
-            law_num,
-            law_title,
-            promulgation_date,
-        });
+        let Some(law_title) = law_title else {
+            continue;
+        };
+        let key = format!(
+            "{}|{}|{}",
+            law_id.clone().unwrap_or_default(),
+            law_num.clone().unwrap_or_default(),
+            law_title
+        );
+        if seen.insert(key) {
+            out.push(LawCandidate {
+                law_id,
+                law_num,
+                law_title,
+                promulgation_date,
+            });
+        }
+    }
+    if out.is_empty() {
+        bail!("法令候補を抽出できませんでした");
     }
     Ok(out)
 }
 
 fn parse_law_contents(v: &Value) -> Result<LawContents> {
     let data = pick_obj(v, &["law_contents", "result", "data"]).unwrap_or(v);
-    let law_id = pick_str(data, &["law_id", "lawId", "id"])
-        .ok_or_else(|| anyhow!("law_id がありません"))?
-        .to_string();
-    let law_num = pick_str(data, &["law_num", "lawNum", "number"]).map(ToString::to_string);
-    let law_title = pick_str(data, &["law_title", "lawTitle", "title", "name"])
+    let law_id = find_str_recursive(data, &["law_id", "lawId", "law_info_id", "lawInfoId", "id"])
+        .map(ToString::to_string);
+    let law_num = find_str_recursive(data, &["law_num", "lawNum", "number", "lawNo"])
+        .map(ToString::to_string);
+    let law_title = find_str_recursive(data, &["law_title", "lawTitle", "title", "name"])
         .ok_or_else(|| anyhow!("law_title がありません"))?
         .to_string();
-    let rendered_markdown = pick_str(data, &["rendered_markdown", "renderedMarkdown", "markdown"])
-        .ok_or_else(|| anyhow!("rendered_markdown がありません"))?
-        .to_string();
+    let rendered_markdown = find_str_recursive(
+        data,
+        &[
+            "rendered_markdown",
+            "renderedMarkdown",
+            "markdown",
+            "rendered_law",
+        ],
+    )
+    .ok_or_else(|| anyhow!("rendered_markdown がありません"))?
+    .to_string();
     let original_xml =
-        pick_str(data, &["original_xml", "originalXml", "xml"]).map(ToString::to_string);
+        find_str_recursive(data, &["original_xml", "originalXml", "xml"]).map(ToString::to_string);
 
     Ok(LawContents {
         law_id,
@@ -319,6 +357,57 @@ fn pick_str<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
         }
     }
     None
+}
+
+fn find_str_recursive<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    if let Some(s) = pick_str(v, keys) {
+        return Some(s);
+    }
+    match v {
+        Value::Object(map) => {
+            for child in map.values() {
+                if let Some(s) = find_str_recursive(child, keys) {
+                    return Some(s);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                if let Some(s) = find_str_recursive(child, keys) {
+                    return Some(s);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn find_candidate_array(v: &Value) -> Option<&Vec<Value>> {
+    if let Some(arr) = pick_array(v, &["laws", "results", "data", "items"]) {
+        if !arr.is_empty() {
+            return Some(arr);
+        }
+    }
+    match v {
+        Value::Object(map) => {
+            for child in map.values() {
+                if let Some(arr) = find_candidate_array(child) {
+                    return Some(arr);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => {
+            if arr.iter().any(|x| x.is_object()) {
+                Some(arr)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn sanitize_filename(s: &str) -> String {
@@ -535,12 +624,26 @@ fn main() -> Result<()> {
         max_depth: cli.max_depth,
         no_overwrite: cli.no_overwrite,
         non_interactive: cli.non_interactive,
-        file_by_law_id: HashMap::new(),
-        title_by_law_id: HashMap::new(),
         unresolved_refs: HashSet::new(),
     };
 
     processor.run(&cli.law_title)
+}
+
+impl LawCandidate {
+    fn identity_key(&self) -> String {
+        if let Some(id) = &self.law_id {
+            return format!("id:{}", id);
+        }
+        if let Some(num) = &self.law_num {
+            return format!("num:{}", num);
+        }
+        format!("title:{}", self.law_title)
+    }
+
+    fn id_display(&self) -> &str {
+        self.law_id.as_deref().unwrap_or("-")
+    }
 }
 
 #[cfg(test)]
