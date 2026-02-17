@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -237,7 +236,6 @@ struct Processor {
     output_dir: PathBuf,
     max_depth: usize,
     no_overwrite: bool,
-    non_interactive: bool,
     dict_path: PathBuf,
     unresolved_path: PathBuf,
     dictionary: LawNameDictionary,
@@ -333,48 +331,34 @@ impl Processor {
             self.register_candidate_aliases(title, &c);
             return Ok(c);
         }
-
-        if self.non_interactive {
-            let exact: Vec<_> = candidates
-                .iter()
-                .filter(|c| c.law_title == title)
-                .cloned()
-                .collect();
-            if exact.len() == 1 {
-                let c = exact[0].clone();
-                self.register_candidate_aliases(title, &c);
-                return Ok(c);
-            }
-            bail!(
-                "法令名 '{}' は複数候補があります。--non-interactive では自動確定できません。",
-                title
-            );
+        let exact: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.law_title == title)
+            .cloned()
+            .collect();
+        if exact.len() == 1 {
+            let c = exact[0].clone();
+            self.register_candidate_aliases(title, &c);
+            return Ok(c);
         }
-
-        println!("複数候補が見つかりました: {}", title);
-        for (i, c) in candidates.iter().enumerate() {
-            println!(
-                "{}. {} / {} / {} / {}",
-                i + 1,
-                c.law_title,
-                c.id_display(),
-                c.law_num.as_deref().unwrap_or("-"),
-                c.promulgation_date.as_deref().unwrap_or("-")
-            );
-        }
-        print!("候補番号を入力してください: ");
-        io::stdout().flush().context("標準出力flush失敗")?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context("入力読み取りに失敗")?;
-        let idx: usize = input.trim().parse().context("数値を入力してください")?;
-        if idx == 0 || idx > candidates.len() {
-            bail!("候補番号が不正です");
-        }
-        let c = candidates.remove(idx - 1);
-        self.register_candidate_aliases(title, &c);
-        Ok(c)
+        let preview = candidates
+            .iter()
+            .take(5)
+            .map(|c| {
+                format!(
+                    "{} / {} / {}",
+                    c.law_title,
+                    c.id_display(),
+                    c.law_num.as_deref().unwrap_or("-")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        bail!(
+            "法令名 '{}' は複数候補があります。on-demand選択は行いません。候補例: {}",
+            title,
+            preview
+        )
     }
 
     /// 1法令分のMarkdownノートを書き出す。
@@ -1071,7 +1055,6 @@ fn main() -> Result<()> {
         output_dir: cli.output_dir,
         max_depth: cli.max_depth,
         no_overwrite: cli.no_overwrite,
-        non_interactive: cli.non_interactive,
         dict_path: cli.dict_path,
         unresolved_path: cli.unresolved_path,
         dictionary,
