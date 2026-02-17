@@ -31,6 +31,8 @@ struct Cli {
     non_interactive: bool,
     #[arg(long, default_value = "data/law_name_dict.json")]
     dict_path: PathBuf,
+    #[arg(long, default_value = "data/unresolved_refs.json")]
+    unresolved_path: PathBuf,
     #[arg(long)]
     refresh_dictionary: bool,
     #[arg(long)]
@@ -103,6 +105,7 @@ struct LawDataResponse {
 /// 本文中の他法令参照（再帰取得キュー用）。
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct LawRef {
+    source_law: String,
     law_title: String,
     article: String,
 }
@@ -111,7 +114,8 @@ struct LawRef {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct UnresolvedRef {
     source_law: String,
-    raw_text: String,
+    alias: String,
+    sample_context: Option<String>,
 }
 
 /// e-Gov法令API v2 クライアント。
@@ -122,6 +126,24 @@ struct ApiClient {
 }
 
 type LawNameDictionary = HashMap<String, LawDictEntry>;
+
+/// 未解決参照レコードの保存形式。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UnresolvedRefStore {
+    items: Vec<UnresolvedRefRecord>,
+}
+
+/// 永続化する未解決参照1件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UnresolvedRefRecord {
+    source_law: String,
+    alias: String,
+    first_seen_at: String,
+    last_seen_at: String,
+    count: u64,
+    sample_context: Option<String>,
+    status: String,
+}
 
 impl ApiClient {
     /// APIクライアントを初期化する。
@@ -217,9 +239,10 @@ struct Processor {
     no_overwrite: bool,
     non_interactive: bool,
     dict_path: PathBuf,
+    unresolved_path: PathBuf,
     dictionary: LawNameDictionary,
     dictionary_dirty: bool,
-    unresolved_refs: HashSet<UnresolvedRef>,
+    unresolved_refs: Vec<UnresolvedRef>,
 }
 
 impl Processor {
@@ -231,9 +254,9 @@ impl Processor {
 
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
-        queue.push_back((root_title.to_string(), 0usize));
+        queue.push_back((root_title.to_string(), 0usize, root_title.to_string()));
 
-        while let Some((title, depth)) = queue.pop_front() {
+        while let Some((title, depth, source_law)) = queue.pop_front() {
             if depth > self.max_depth {
                 continue;
             }
@@ -243,6 +266,11 @@ impl Processor {
                     if depth == 0 {
                         return Err(e);
                     }
+                    self.unresolved_refs.push(UnresolvedRef {
+                        source_law: source_law.clone(),
+                        alias: title.clone(),
+                        sample_context: Some("参照先法令名の解決失敗".to_string()),
+                    });
                     eprintln!(
                         "警告: 参照先法令の解決に失敗したためスキップ: {} ({})",
                         title, e
@@ -263,18 +291,23 @@ impl Processor {
             let contents = self.api.fetch_law_contents(&candidate)?;
             self.write_law_note(&contents, depth)?;
 
-            let refs = extract_external_references(&contents.markdown, &self.dictionary)?;
+            let refs = extract_external_references(
+                &contents.markdown,
+                &self.dictionary,
+                &contents.law_title,
+            )?;
             for law_ref in refs {
-                queue.push_back((law_ref.law_title, depth + 1));
+                queue.push_back((law_ref.law_title, depth + 1, law_ref.source_law));
             }
         }
 
         if !self.unresolved_refs.is_empty() {
             eprintln!("未解決参照:");
             for r in &self.unresolved_refs {
-                eprintln!("  - [{}] {}", r.source_law, r.raw_text);
+                eprintln!("  - [{}] {}", r.source_law, r.alias);
             }
         }
+        self.save_unresolved_refs()?;
         self.save_dictionary()?;
         Ok(())
     }
@@ -358,7 +391,8 @@ impl Processor {
         self.unresolved_refs
             .extend(unresolved.into_iter().map(|x| UnresolvedRef {
                 source_law: law.law_title.clone(),
-                raw_text: x,
+                alias: x,
+                sample_context: None,
             }));
 
         let frontmatter = format!(
@@ -438,6 +472,51 @@ impl Processor {
         self.dictionary_dirty = false;
         Ok(())
     }
+
+    /// 未解決参照を集約形式で保存する。
+    fn save_unresolved_refs(&self) -> Result<()> {
+        if self.unresolved_refs.is_empty() {
+            return Ok(());
+        }
+        let mut store = load_unresolved_store(&self.unresolved_path)?;
+        let now = Utc::now().to_rfc3339();
+
+        for event in &self.unresolved_refs {
+            if let Some(existing) = store
+                .items
+                .iter_mut()
+                .find(|x| x.source_law == event.source_law && x.alias == event.alias)
+            {
+                existing.count += 1;
+                existing.last_seen_at = now.clone();
+                if existing.sample_context.is_none() && event.sample_context.is_some() {
+                    existing.sample_context = event.sample_context.clone();
+                }
+            } else {
+                store.items.push(UnresolvedRefRecord {
+                    source_law: event.source_law.clone(),
+                    alias: event.alias.clone(),
+                    first_seen_at: now.clone(),
+                    last_seen_at: now.clone(),
+                    count: 1,
+                    sample_context: event.sample_context.clone(),
+                    status: "pending".to_string(),
+                });
+            }
+        }
+
+        if let Some(parent) = self.unresolved_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("未解決参照ディレクトリ作成に失敗: {}", parent.display())
+                })?;
+            }
+        }
+        let json = serde_json::to_string_pretty(&store)
+            .context("未解決参照JSONのシリアライズに失敗しました")?;
+        fs::write(&self.unresolved_path, json)
+            .with_context(|| format!("未解決参照保存に失敗: {}", self.unresolved_path.display()))
+    }
 }
 
 /// `/laws` レスポンスを内部候補型へ変換する。
@@ -490,6 +569,16 @@ fn load_dictionary(path: &Path) -> Result<LawNameDictionary> {
     let dict: LawNameDictionary =
         serde_json::from_str(&raw).context("辞書JSONの解析に失敗しました")?;
     Ok(dict)
+}
+
+/// 未解決参照ストアを読み込む。
+fn load_unresolved_store(path: &Path) -> Result<UnresolvedRefStore> {
+    if !path.exists() {
+        return Ok(UnresolvedRefStore { items: Vec::new() });
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("未解決参照ファイル読み込みに失敗: {}", path.display()))?;
+    serde_json::from_str(&raw).context("未解決参照JSONの解析に失敗しました")
 }
 
 /// `/laws` を全件走査して法令名辞書を更新する。
@@ -663,6 +752,7 @@ fn ensure_article_headings(markdown: &str) -> Result<String> {
 fn extract_external_references(
     markdown: &str,
     dictionary: &LawNameDictionary,
+    source_law: &str,
 ) -> Result<HashSet<LawRef>> {
     let ref_re = Regex::new(
         r"(?P<law>[ぁ-んァ-ヶー一-龥A-Za-z0-9・（）()「」『』]{1,40}?(?:法|法律|政令|省令|府令|規則|条例|条約))第(?P<article>[0-9一二三四五六七八九十百千〇]+)条",
@@ -675,7 +765,11 @@ fn extract_external_references(
             .and_then(|m| resolve_law_title_from_fragment(m.as_str(), dictionary));
         let article = caps.name("article").map(|m| format!("第{}条", m.as_str()));
         if let (Some(law_title), Some(article)) = (law_title, article) {
-            out.insert(LawRef { law_title, article });
+            out.insert(LawRef {
+                source_law: source_law.to_string(),
+                law_title,
+                article,
+            });
         }
     }
     Ok(out)
@@ -979,9 +1073,10 @@ fn main() -> Result<()> {
         no_overwrite: cli.no_overwrite,
         non_interactive: cli.non_interactive,
         dict_path: cli.dict_path,
+        unresolved_path: cli.unresolved_path,
         dictionary,
         dictionary_dirty: false,
-        unresolved_refs: HashSet::new(),
+        unresolved_refs: Vec::new(),
     };
 
     processor.run(law_title)

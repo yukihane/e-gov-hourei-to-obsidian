@@ -1,0 +1,49 @@
+{
+  "items": [
+    {
+      "source_law": "特許法",
+      "alias": "次条",
+      "first_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "last_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "count": 36,
+      "sample_context": null,
+      "status": "pending"
+    },
+    {
+      "source_law": "特許法",
+      "alias": "前項",
+      "first_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "last_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "count": 214,
+      "sample_context": null,
+      "status": "pending"
+    },
+    {
+      "source_law": "特許法",
+      "alias": "同条",
+      "first_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "last_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "count": 80,
+      "sample_context": null,
+      "status": "pending"
+    },
+    {
+      "source_law": "特許法",
+      "alias": "同項",
+      "first_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "last_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "count": 100,
+      "sample_context": null,
+      "status": "pending"
+    },
+    {
+      "source_law": "特許法",
+      "alias": "前条",
+      "first_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "last_seen_at": "2026-02-17T21:27:20.328308141+00:00",
+      "count": 107,
+      "sample_context": null,
+      "status": "pending"
+    }
+  ]
+}
