@@ -73,7 +73,7 @@ Dockerでの実行コマンド（正式手順）:
 
 ## データ仕様
 
-### laws/<safe_title>.md
+### laws/<safe_title>_<law_id>.md
 
 1. YAMLフロントマター:
 - `law_id`
@@ -157,7 +157,7 @@ Dockerでの実行コマンド（正式手順）:
 2. 本実装では非リンク文言に対して形態素解析や推測補完を行わない。
 
 7. 出力:
-1. `laws/<safe_title>.md` を上書き再生成
+1. `laws/<safe_title>_<law_id>.md` を上書き再生成
 2. `data/unresolved_refs.json` は追記
 
 ## エラー処理・再試行
