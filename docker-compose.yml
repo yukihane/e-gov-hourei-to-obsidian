@@ -1,0 +1,11 @@
+services:
+  law-scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: e-gov-jobun-to-obsidian:latest
+    working_dir: /app
+    volumes:
+      - ./laws:/app/laws
+      - ./data:/app/data
+    entrypoint: ["node", "dist/cli.js"]

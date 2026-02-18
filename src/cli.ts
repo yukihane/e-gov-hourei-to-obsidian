@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { chromium } from 'playwright';
+import { pathToFileURL } from 'node:url';
+import { chromium, type Page } from 'playwright';
 
 const DEFAULT_API_BASE = 'https://laws.e-gov.go.jp';
 const DEFAULT_DICTIONARY_PATH = 'data/law_dictionary.json';
@@ -73,7 +74,7 @@ interface ArticleBlock {
   paragraphs: ArticleParagraph[];
 }
 
-interface ScrapedLawDocument {
+export interface ScrapedLawDocument {
   lawId: string;
   title: string;
   sourceUrl: string;
@@ -95,6 +96,11 @@ interface ProcessContext {
 
 interface ExistingReferenceScanResult {
   referencedLawIds: string[];
+}
+
+interface LawDataResponse {
+  law_info?: Record<string, unknown>;
+  revision_info?: Record<string, unknown>;
 }
 
 /**
@@ -220,6 +226,28 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getLawSiteBaseUrl(apiBaseUrl: string): string {
+  return apiBaseUrl.replace(/\/api\/2\/?$/, '').replace(/\/$/, '');
+}
+
+/**
+ * 本文ルートがSPA描画で遅延するため、複数候補セレクタのいずれかが現れるまで待機する。
+ */
+async function waitForProvisionRoot(page: Page, timeoutMs: number): Promise<void> {
+  const selectors = ['#MainProvision', '#provisionview', 'main.main-content'];
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const found = await page.evaluate((candidates) => {
+      return candidates.some((selector) => document.querySelector(selector) !== null);
+    }, selectors);
+    if (found) {
+      return;
+    }
+    await wait(200);
+  }
+  throw new Error('本文セレクタ未検出');
+}
+
 /**
  * 法令候補検索API `/api/2/laws` の結果を候補配列へ変換する。
  * Swagger定義に合わせ、`law_info` と `revision_info` から必要情報のみを抜き出す。
@@ -315,6 +343,22 @@ async function buildDictionary(options: CliOptions): Promise<void> {
 }
 
 /**
+ * `law_id` から法令名を取得し、辞書未登録エントリを補完する。
+ * `--dictionary-autoupdate` 用で、取得失敗時はフォールバック名を返す。
+ */
+async function fetchLawTitleById(options: CliOptions, lawId: string): Promise<string | undefined> {
+  const url = new URL(`/api/2/law_data/${lawId}`, options.apiBaseUrl);
+  url.searchParams.set('response_format', 'json');
+  const payload = (await fetchJson(url.toString(), options.retry)) as LawDataResponse;
+  const revisionInfo = payload.revision_info ?? {};
+  const title = revisionInfo.law_title;
+  if (typeof title === 'string' && title.trim().length > 0) {
+    return title.trim();
+  }
+  return undefined;
+}
+
+/**
  * 指定パスにJSONを保存する。
  * 親ディレクトリを先に作成して、初回実行でも失敗しないようにする。
  */
@@ -337,7 +381,7 @@ async function loadDictionary(filePath: string): Promise<LawDictionary> {
   }
 }
 
-function toSafeTitle(title: string): string {
+export function toSafeTitle(title: string): string {
   const normalized = title
     .normalize('NFKC')
     .replace(/[\\/:*?"<>|]/g, '_')
@@ -361,89 +405,136 @@ function getFileName(lawId: string, title: string): string {
 async function scrapeLawDocument(lawId: string, options: CliOptions): Promise<ScrapedLawDocument> {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  const sourceUrl = `${options.apiBaseUrl.replace('/api/2', '')}/law/${lawId}`.replace(/\/$/, '');
+  const sourceUrl = `${getLawSiteBaseUrl(options.apiBaseUrl)}/law/${lawId}`;
 
   try {
     await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
     await page.waitForLoadState('networkidle', { timeout: options.timeoutMs }).catch(() => undefined);
-
-    const result = await page.evaluate(() => {
-      const provisionRoot =
-        document.querySelector('#MainProvision') ??
-        document.querySelector('#provisionview') ??
-        document.querySelector('main.main-content');
-      if (!provisionRoot) {
-        throw new Error('本文セレクタ未検出');
-      }
-
-      const title =
-        document.querySelector('h1')?.textContent?.trim() ??
-        document.title.replace(' | e-Gov 法令検索', '').trim() ??
-        '無題法令';
-
-      const articleNodes = Array.from(
-        provisionRoot.querySelectorAll<HTMLElement>('article.article[id]'),
-      );
-
-      const blocks = articleNodes.map((article) => {
-        const heading =
-          article.querySelector<HTMLElement>('.articleheading, .paragraphtitle, .istitle')?.innerText.trim() ??
-          article.getAttribute('id') ??
-          '条文';
-
-        const paragraphNodes = Array.from(article.querySelectorAll<HTMLElement>('p.sentence'));
-        const paragraphs = paragraphNodes.map((p, index) => {
-          const anchor = p.getAttribute('id') ?? `${article.id}-p${index + 1}`;
-          const segments: ParagraphSegment[] = [];
-
-          // a[href]以外の参照文言は推測リンク化せず、テキストのまま保持する。
-          const walker = document.createTreeWalker(p, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-          let node = walker.nextNode();
-          while (node) {
-            if (node.nodeType === Node.TEXT_NODE) {
-              const text = node.textContent ?? '';
-              if (text) {
-                segments.push({ type: 'text', text });
-              }
-            } else if (node.nodeType === Node.ELEMENT_NODE) {
-              const element = node as HTMLElement;
-              if (element.tagName.toLowerCase() === 'a' && element.hasAttribute('href')) {
-                segments.push({
-                  type: 'link',
-                  text: element.textContent?.trim() ?? '',
-                  href: element.getAttribute('href') ?? '',
-                });
-              }
-            }
-            node = walker.nextNode();
-          }
-
-          return { anchor, segments };
-        });
-
-        return {
-          id: article.getAttribute('id') ?? '',
-          heading,
-          paragraphs,
-        };
-      });
-
-      return { title, blocks };
-    });
-
-    return {
-      lawId,
-      title: result.title,
-      sourceUrl,
-      blocks: result.blocks,
-    };
+    await waitForProvisionRoot(page, options.timeoutMs);
+    return extractLawDocumentFromPage(page, lawId, sourceUrl);
   } finally {
     await browser.close();
   }
 }
 
-function parseLawIdFromHref(href: string): { lawId: string; anchor?: string } | undefined {
-  const matched = href.match(/^\/law\/([A-Za-z0-9]+)(?:#([A-Za-z0-9_-]+))?$/);
+/**
+ * 既に読み込まれたページDOMから本文構造を抽出する。
+ * テストではローカル保存HTMLを `page.setContent` したページにも再利用する。
+ */
+export async function extractLawDocumentFromPage(
+  page: Page,
+  lawId: string,
+  sourceUrl: string,
+): Promise<ScrapedLawDocument> {
+  const result = await page.evaluate(() => {
+    const provisionRoot =
+      document.querySelector('#MainProvision') ??
+      document.querySelector('#provisionview') ??
+      document.querySelector('main.main-content');
+    if (!provisionRoot) {
+      throw new Error('本文セレクタ未検出');
+    }
+
+    const title =
+      document.querySelector('h1')?.textContent?.trim() ??
+      document.title.replace(' | e-Gov 法令検索', '').trim() ??
+      '無題法令';
+
+    const articleNodes = Array.from(provisionRoot.querySelectorAll<HTMLElement>('article.article[id]'));
+    const fallbackArticleNodes =
+      articleNodes.length > 0
+        ? articleNodes
+        : Array.from(
+            provisionRoot.querySelectorAll<HTMLElement>(
+              '[id^="Mp-"], [id^="Sup-"], [id^="App-"], [id^="Ap-"], [id^="Enf-"]',
+            ),
+          );
+
+    const blocks = fallbackArticleNodes.map((article) => {
+      const heading =
+        article.querySelector<HTMLElement>('.articleheading, .paragraphtitle, .istitle')?.innerText.trim() ??
+        article.getAttribute('id') ??
+        '条文';
+
+      const paragraphNodes = Array.from(article.querySelectorAll<HTMLElement>('p.sentence'));
+      const paragraphs = paragraphNodes.map((p, index) => {
+        const anchor = p.getAttribute('id') ?? `${article.id}-p${index + 1}`;
+        const segments: ParagraphSegment[] = [];
+
+        // a[href]以外の参照文言は推測リンク化せず、テキストのまま保持する。
+        const collect = (node: Node): void => {
+          if (node.nodeType === Node.TEXT_NODE) {
+            const text = node.textContent ?? '';
+            if (text) {
+              segments.push({ type: 'text', text });
+            }
+            return;
+          }
+          if (node.nodeType !== Node.ELEMENT_NODE) {
+            return;
+          }
+          const element = node as HTMLElement;
+          if (element.tagName.toLowerCase() === 'a' && element.hasAttribute('href')) {
+            segments.push({
+              type: 'link',
+              text: element.textContent?.trim() ?? '',
+              href: element.getAttribute('href') ?? '',
+            });
+            return;
+          }
+          for (const child of Array.from(element.childNodes)) {
+            collect(child);
+          }
+        };
+        for (const child of Array.from(p.childNodes)) {
+          collect(child);
+        }
+
+        return { anchor, segments };
+      });
+
+      return {
+        id: article.getAttribute('id') ?? '',
+        heading,
+        paragraphs,
+      };
+    });
+
+    return { title, blocks };
+  });
+
+  return {
+    lawId,
+    title: result.title,
+    sourceUrl,
+    blocks: result.blocks,
+  };
+}
+
+/**
+ * 法令ページ取得を再試行付きで実行する。
+ * SPA表示遅延や一時的なナビゲーション失敗を吸収し、計画書のバックオフ方針に合わせる。
+ */
+async function scrapeLawDocumentWithRetry(lawId: string, options: CliOptions): Promise<ScrapedLawDocument> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < options.retry; attempt += 1) {
+    try {
+      return await scrapeLawDocument(lawId, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < options.retry) {
+        await wait(2 ** attempt * 1000);
+      }
+    }
+  }
+  throw lastError;
+}
+
+export function parseLawIdFromHref(href: string): { lawId: string; anchor?: string } | undefined {
+  const normalizedHref = href.trim();
+  const matched = normalizedHref.match(
+    /^(?:https?:\/\/laws\.e-gov\.go\.jp)?\/law\/([A-Za-z0-9]+)\/?(?:#([A-Za-z0-9_-]+))?$/,
+  );
   if (!matched) {
     return undefined;
   }
@@ -452,6 +543,28 @@ function parseLawIdFromHref(href: string): { lawId: string; anchor?: string } | 
 
 function unresolvedKey(item: UnresolvedRefRecord): string {
   return `${item.root_law_id}\t${item.from_anchor}\t${item.raw_text}\t${item.href}`;
+}
+
+function collectReferencedLawIds(doc: ScrapedLawDocument): string[] {
+  const ids = new Set<string>();
+  for (const block of doc.blocks) {
+    for (const paragraph of block.paragraphs) {
+      for (const segment of paragraph.segments) {
+        if (segment.type !== 'link') {
+          continue;
+        }
+        const parsed = parseLawIdFromHref(segment.href);
+        if (parsed) {
+          ids.add(parsed.lawId);
+        }
+      }
+    }
+  }
+  return [...ids];
+}
+
+function isFallbackDictionaryEntry(lawId: string, entry: LawDictionaryEntry): boolean {
+  return entry.file_name === `law_${lawId}.md`;
 }
 
 /**
@@ -536,6 +649,22 @@ function renderMarkdown(
               context.unresolved.push(unresolved);
             }
           }
+          if (isFallbackDictionaryEntry(parsed.lawId, entry)) {
+            const unresolved: UnresolvedRefRecord = {
+              timestamp: new Date().toISOString(),
+              root_law_id: context.rootLawId,
+              root_law_title: context.rootLawTitle,
+              from_anchor: paragraph.anchor,
+              raw_text: linkText,
+              href,
+              reason: 'target_not_built',
+            };
+            const key = unresolvedKey(unresolved);
+            if (!context.unresolvedSeen.has(key)) {
+              context.unresolvedSeen.add(key);
+              context.unresolved.push(unresolved);
+            }
+          }
 
           if (currentDepth + 1 > options.maxDepth) {
             const unresolved: UnresolvedRefRecord = {
@@ -602,6 +731,37 @@ function renderMarkdown(
   };
 }
 
+/**
+ * フィクスチャテスト用に最小コンテキストでMarkdownを生成する。
+ * 本番処理と同じレンダラを通すことで、差分を出さない検証を行う。
+ */
+export function renderMarkdownForTest(doc: ScrapedLawDocument): string {
+  const result = renderMarkdown(
+    doc,
+    {},
+    {
+      buildDictionary: false,
+      maxDepth: 1,
+      ifExists: 'overwrite',
+      retry: 3,
+      timeoutMs: 30_000,
+      dictionaryPath: DEFAULT_DICTIONARY_PATH,
+      dictionaryAutoupdate: false,
+      unresolvedPath: DEFAULT_UNRESOLVED_PATH,
+      outputDir: DEFAULT_OUTPUT_DIR,
+      apiBaseUrl: DEFAULT_API_BASE,
+    },
+    {
+      rootLawId: doc.lawId,
+      rootLawTitle: doc.title,
+      unresolved: [],
+      unresolvedSeen: new Set(),
+    },
+    0,
+  );
+  return result.markdown;
+}
+
 function escapeYaml(value: string): string {
   return JSON.stringify(value);
 }
@@ -618,9 +778,9 @@ function notePath(outputDir: string, fileName: string): string {
  * 既存Markdown中のObsidianリンクから参照先law_idを抽出する。
  * skipモードでも再帰収集を継続するために必要。
  */
-function scanReferencedLawIdsFromMarkdown(markdown: string): ExistingReferenceScanResult {
+export function scanReferencedLawIdsFromMarkdown(markdown: string): ExistingReferenceScanResult {
   const ids = new Set<string>();
-  const re = /\[\[laws\/[^\]_]+_([A-Za-z0-9]+)\.md(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
+  const re = /\[\[laws\/[^\]]*?_([A-Za-z0-9]+)\.md(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(markdown)) !== null) {
     ids.add(match[1]);
@@ -729,7 +889,7 @@ async function processLawGraph(
 
     process.stdout.write(`取得中: ${dictEntry.title} (${item.lawId}) depth=${item.depth}\n`);
 
-    const scraped = await scrapeLawDocument(item.lawId, options);
+    const scraped = await scrapeLawDocumentWithRetry(item.lawId, options);
 
     const freshFileName = getFileName(item.lawId, scraped.title);
     dictionary[item.lawId] = {
@@ -738,6 +898,36 @@ async function processLawGraph(
       file_name: freshFileName,
       updated_at: new Date().toISOString(),
     };
+
+    const referencedIds = collectReferencedLawIds(scraped);
+    for (const referencedLawId of referencedIds) {
+      if (dictionary[referencedLawId]) {
+        continue;
+      }
+      if (options.dictionaryAutoupdate) {
+        try {
+          const resolvedTitle = await fetchLawTitleById(options, referencedLawId);
+          if (resolvedTitle) {
+            const safeTitle = toSafeTitle(resolvedTitle);
+            dictionary[referencedLawId] = {
+              title: resolvedTitle,
+              safe_title: safeTitle,
+              file_name: `${safeTitle}_${referencedLawId}.md`,
+              updated_at: new Date().toISOString(),
+            };
+            continue;
+          }
+        } catch {
+          // API障害時はフォールバック名で継続する。処理停止より欠損最小化を優先する。
+        }
+      }
+      dictionary[referencedLawId] = {
+        title: `law_${referencedLawId}`,
+        safe_title: `law_${referencedLawId}`,
+        file_name: `law_${referencedLawId}.md`,
+        updated_at: new Date().toISOString(),
+      };
+    }
 
     const rendered = renderMarkdown(scraped, dictionary, options, context, item.depth);
     if (rendered.dictionaryDirty) {
@@ -784,7 +974,9 @@ async function main(): Promise<void> {
   await processLawGraph(options, rootLawId, rootTitle ?? `law_${rootLawId}`, dictionary);
 }
 
-main().catch((error) => {
-  process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}
