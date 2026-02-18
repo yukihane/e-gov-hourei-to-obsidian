@@ -46,7 +46,7 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 1. `node dist/cli.js --law-id <law_id> [--retry 3] [--timeout-ms 30000]`
 2. `node dist/cli.js "<法令名>" [--retry 3] [--timeout-ms 30000]`
-3. `node dist/cli.js --build-dictionary [--dictionary data/law_dictionary.json] [--limit N]`
+3. `node dist/cli.js --build-dictionary [--dictionary data/law_dictionary.json]`
 4. `node dist/cli.js --law-id <law_id> [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 5. `node dist/cli.js "<法令名>" [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 
@@ -63,8 +63,8 @@ Dockerでの実行コマンド（正式手順）:
 
 辞書関連オプションの動作:
 1. `--build-dictionary`:
-- `/api/2/laws` を走査し `data/law_dictionary.json` を再生成する
-- `--limit N` 指定時は先頭 `N` 件のみでテスト生成する
+- `/api/2/laws` を全件走査し `data/law_dictionary.json` を再生成する
+- ページングは `limit=100` / `offset` 増分で実装し、取得件数が 0 件になった時点で終了する
 2. `--dictionary-autoupdate`:
 - 参照リンク解決中に未知の `law_id` が出たらAPIで都度取得し辞書へ追記する
 - 追記失敗時は `law_<law_id>.md` へフォールバックし `unresolved_refs` に記録する
