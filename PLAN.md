@@ -12,14 +12,14 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 - 実行スクリプト: `scripts/poc_fetch_law.mjs`
 - 対象法令: `334AC0000000121`（特許法）
 - ダンプ保存先:
-1. `data/scrape_dumps/334AC0000000121/page.html`
-2. `data/scrape_dumps/334AC0000000121/summary.json`
+  1. `data/scrape_dumps/334AC0000000121/page.html`
+  2. `data/scrape_dumps/334AC0000000121/summary.json`
 
 - 確認結果:
-1. `title`: `特許法 | e-Gov 法令検索`
-2. `textLength`: `124859`
-3. `hrefCount`: `2415`
-4. `第一条` / `附則` を本文テキストとして検出済み
+  1. `title`: `特許法 | e-Gov 法令検索`
+  2. `textLength`: `124859`
+  3. `hrefCount`: `2415`
+  4. `第一条` / `附則` を本文テキストとして検出済み
 
 上記により「SPA実行後DOMから本文とリンクを取得可能」を前提として確定する。
 
@@ -32,15 +32,15 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 ## アーキテクチャ変更
 
 - 旧:
-1. Rust CLI (`reqwest`) で `/api/2/laws` `/api/2/law_data` を呼び出し
-2. JSON構造を解析してMarkdown化
+  1. Rust CLI (`reqwest`) で `/api/2/laws` `/api/2/law_data` を呼び出し
+  2. JSON構造を解析してMarkdown化
 
 - 新:
-1. Node CLI（TypeScript）を新規作成
-2. Playwright で `/law/{law_id}` を開く
-3. 実DOMから本文・見出しID・リンクを抽出
-4. Markdownレンダラで `laws/*.md` を出力
-5. 未解決参照ログを `data/unresolved_refs.json` に追記
+  1. Node CLI（TypeScript）を新規作成
+  2. Playwright で `/law/{law_id}` を開く
+  3. 実DOMから本文・見出しID・リンクを抽出
+  4. Markdownレンダラで `laws/*.md` を出力
+  5. 未解決参照ログを `data/unresolved_refs.json` に追記
 
 ## 公開インターフェース（CLI）仕様
 
@@ -75,13 +75,13 @@ Dockerでの実行コマンド（正式手順）:
 
 辞書関連オプションの動作:
 1. `--build-dictionary`:
-- `/api/2/laws` を全件走査し `data/law_dictionary.json` を再生成する
-- ページングは `limit=100` / `offset` 増分で実装し、取得件数が 0 件になった時点で終了する
+   - `/api/2/laws` を全件走査し `data/law_dictionary.json` を再生成する
+   - ページングは `limit=100` / `offset` 増分で実装し、取得件数が 0 件になった時点で終了する
 2. `--dictionary-autoupdate`:
-- 参照リンク解決中に未知の `law_id` が出たらAPIで都度取得し辞書へ追記する
-- 追記失敗時は `law_<law_id>.md` へフォールバックし `unresolved_refs` に記録する
+   - 参照リンク解決中に未知の `law_id` が出たらAPIで都度取得し辞書へ追記する
+   - 追記失敗時は `law_<law_id>.md` へフォールバックし `unresolved_refs` に記録する
 3. `--dictionary`:
-- 辞書ファイルの入出力パスを切り替える
+   - 辞書ファイルの入出力パスを切り替える
 
 `--dictionary-autoupdate` を付けない場合:
 1. 未知の `law_id` はAPI照会せず、`law_<law_id>.md` へフォールバックする
@@ -92,10 +92,10 @@ Dockerでの実行コマンド（正式手順）:
 ### laws/<safe_title>_<law_id>.md
 
 1. YAMLフロントマター:
-- `law_id`
-- `title`
-- `source_url`
-- `fetched_at`
+   - `law_id`
+   - `title`
+   - `source_url`
+   - `fetched_at`
 2. 本文はe-Gov DOMの論理構造（章/条/項）に沿って見出し化
 3. アンカーはe-Govの `id` を優先利用
 4. 参照リンクはObsidianリンクへ変換
@@ -124,10 +124,10 @@ Dockerでの実行コマンド（正式手順）:
 
 1. キー: `law_id`
 2. 値の必須キー:
-- `title`（現行法令名）
-- `safe_title`（ファイル名用に正規化・短縮済み）
-- `file_name`（`<safe_title>_<law_id>.md`）
-- `updated_at`（辞書更新日時）
+   - `title`（現行法令名）
+   - `safe_title`（ファイル名用に正規化・短縮済み）
+   - `file_name`（`<safe_title>_<law_id>.md`）
+   - `updated_at`（辞書更新日時）
 
 例:
 ```json
@@ -149,25 +149,25 @@ Dockerでの実行コマンド（正式手順）:
 4. キュー処理（幅優先）で法令を順に取得し、`depth <= max-depth` のものだけ処理する
 5. Playwrightで `https://laws.e-gov.go.jp/law/{law_id}` へ遷移
 6. 待機順序:
-1. `domcontentloaded`
-2. `networkidle`
-3. 本文ルート候補セレクタのいずれか検出
+   1. `domcontentloaded`
+   2. `networkidle`
+   3. 本文ルート候補セレクタのいずれか検出
 
 7. 抽出セレクタ方針（優先順）:
-1. 本文ルート: `#MainProvision` → `#provisionview` → `main.main-content`
-2. 条文ブロック: `article.article[id]`
-3. 見出し: `.articleheading`, `.paragraphtitle`, `.istitle`
-4. 本文行: `p.sentence`
-5. 補助IDパターン: `[id^=\"Mp-\"]`, `[id^=\"Sup-\"]`, `[id^=\"App-\"]`, `[id^=\"Ap-\"]`, `[id^=\"Enf-\"]`
-6. リンク: `a[href]`
+   1. 本文ルート: `#MainProvision` → `#provisionview` → `main.main-content`
+   2. 条文ブロック: `article.article[id]`
+   3. 見出し: `.articleheading`, `.paragraphtitle`, `.istitle`
+   4. 本文行: `p.sentence`
+   5. 補助IDパターン: `[id^=\"Mp-\"]`, `[id^=\"Sup-\"]`, `[id^=\"App-\"]`, `[id^=\"Ap-\"]`, `[id^=\"Enf-\"]`
+   6. リンク: `a[href]`
 
 8. リンク正規化:
-1. `href^=\"#Mp-\"` を最優先で同一ノート内アンカーへ
-2. `href=\"#TOC\"` `href=\"#MainProvision\"` も同一ノート内アンカーへ
-3. `href=\"/law/{law_id}\"` は `laws/<file_name>` へ
-4. それ以外は外部リンクとして残す
-5. 解決不能はプレーンテキスト化して `unresolved_refs` へ記録
-6. `a[href]` を持たない参照文言は推測リンク化しない（プレーンテキストのまま出力）
+   1. `href^=\"#Mp-\"` を最優先で同一ノート内アンカーへ
+   2. `href=\"#TOC\"` `href=\"#MainProvision\"` も同一ノート内アンカーへ
+   3. `href=\"/law/{law_id}\"` は `laws/<file_name>` へ
+   4. それ以外は外部リンクとして残す
+   5. 解決不能はプレーンテキスト化して `unresolved_refs` へ記録
+   6. `a[href]` を持たない参照文言は推測リンク化しない（プレーンテキストのまま出力）
 
 `href=\"/law/{law_id}\"` の `<target>` 決定規則:
 1. まず `data/law_dictionary.json` を参照し、`file_name` を採用
@@ -186,9 +186,9 @@ Dockerでの実行コマンド（正式手順）:
 2. 本実装では非リンク文言に対して形態素解析や推測補完を行わない。
 
 9. 出力:
-1. `--if-exists=overwrite` の場合は `laws/<safe_title>_<law_id>.md` を上書き再生成
-2. `--if-exists=skip` の場合は既存ファイルを維持し、未存在ファイルのみ新規生成
-3. `data/unresolved_refs.json` は追記
+   1. `--if-exists=overwrite` の場合は `laws/<safe_title>_<law_id>.md` を上書き再生成
+   2. `--if-exists=skip` の場合は既存ファイルを維持し、未存在ファイルのみ新規生成
+   3. `data/unresolved_refs.json` は追記
 
 ## エラー処理・再試行
 
@@ -215,9 +215,9 @@ Dockerでの実行コマンド（正式手順）:
 ### フィクスチャテスト
 1. `data/scrape_dumps/334AC0000000121/page.html` からMarkdown生成
 2. 最低要件アサート:
-- `第一条` を含む
-- 内部アンカーリンクが1件以上
-- フロントマター必須キーが揃う
+   - `第一条` を含む
+   - 内部アンカーリンクが1件以上
+   - フロントマター必須キーが揃う
 
 ### E2E（Docker）
 1. `--law-id 334AC0000000121 --max-depth 1` で `laws/*.md` 生成
