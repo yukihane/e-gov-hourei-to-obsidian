@@ -103,13 +103,12 @@ Dockerでの実行コマンド（正式手順）:
 4. `from_anchor`
 5. `raw_text`
 6. `href`（存在すれば）
-7. `reason`（`no_target_note` / `target_not_built` / `unknown_format` / `depth_limit`）
+7. `reason`（`target_not_built` / `unknown_format` / `depth_limit`）
 
 `reason` の使用条件:
 1. `target_not_built`: 参照先 `law_id` は判明したが、辞書未登録または参照先ノート未生成
-2. `no_target_note`: 参照先は判明したが、出力ポリシーによりリンク出力対象外
-3. `unknown_format`: `href` が想定形式（`#...` / `/law/{law_id}` / 外部URL）に一致しない
-4. `depth_limit`: `law_id` は判明したが、`--max-depth` の上限に達して取得対象外
+2. `unknown_format`: `href` が想定形式（`#...` / `/law/{law_id}` / 外部URL）に一致しない
+3. `depth_limit`: `law_id` は判明したが、`--max-depth` の上限に達して取得対象外
 
 重複判定キー: `root_law_id + from_anchor + raw_text + href`
 
@@ -170,6 +169,11 @@ Dockerでの実行コマンド（正式手順）:
 3. 参照先 `law_id` の深さが `max-depth` 以下なら取得キューへ追加する
 4. 参照先 `law_id` の深さが `max-depth` を超える場合でもリンクは生成し、`reason=depth_limit` で記録する
 5. 未生成・未登録の場合は `data/unresolved_refs.json` に `reason=target_not_built` で追記する
+
+`href=\"/law/{law_id}#<anchor>\"` の変換規則:
+1. `law_id` と `anchor` を分離して解釈する
+2. 参照先ノートは上記 `<target>` 決定規則に従って決定する
+3. Obsidianリンクは `[[laws/<file_name>#<anchor>|表示文言]]` へ変換する
 
 補足:
 1. 非リンク文言（`a[href]` を持たない条文内参照）は `law_id` を確定できないため、リンク生成対象外とする。
