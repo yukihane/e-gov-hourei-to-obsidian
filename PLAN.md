@@ -164,7 +164,7 @@ Dockerでの実行コマンド（正式手順）:
 8. リンク正規化:
 1. `href^=\"#Mp-\"` を最優先で同一ノート内アンカーへ
 2. `href=\"#TOC\"` `href=\"#MainProvision\"` も同一ノート内アンカーへ
-3. `href=\"/law/{law_id}\"` は `laws/<target>.md` へ
+3. `href=\"/law/{law_id}\"` は `laws/<file_name>` へ
 4. それ以外は外部リンクとして残す
 5. 解決不能はプレーンテキスト化して `unresolved_refs` へ記録
 6. `a[href]` を持たない参照文言は推測リンク化しない（プレーンテキストのまま出力）
