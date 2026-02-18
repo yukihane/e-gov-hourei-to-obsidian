@@ -71,6 +71,10 @@ Dockerでの実行コマンド（正式手順）:
 3. `--dictionary`:
 - 辞書ファイルの入出力パスを切り替える
 
+`--dictionary-autoupdate` を付けない場合:
+1. 未知の `law_id` はAPI照会せず、`law_<law_id>.md` へフォールバックする
+2. 同時に `data/unresolved_refs.json` へ `reason=target_not_built` で記録する
+
 ## データ仕様
 
 ### laws/<safe_title>_<law_id>.md
@@ -94,6 +98,11 @@ Dockerでの実行コマンド（正式手順）:
 5. `raw_text`
 6. `href`（存在すれば）
 7. `reason`（`no_target_note` / `target_not_built` / `unknown_format`）
+
+`reason` の使用条件:
+1. `target_not_built`: 参照先 `law_id` は判明したが、辞書未登録または参照先ノート未生成
+2. `no_target_note`: 参照先は判明したが、出力ポリシーによりリンク出力対象外
+3. `unknown_format`: `href` が想定形式（`#...` / `/law/{law_id}` / 外部URL）に一致しない
 
 重複判定キー: `root_law_id + from_anchor + raw_text + href`
 
