@@ -44,11 +44,11 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 ## 公開インターフェース（CLI）仕様
 
-1. `node dist/cli.js --law-id <law_id> [--max-depth 1] [--retry 3] [--timeout-ms 30000]`
-2. `node dist/cli.js "<法令名>" [--max-depth 1] [--retry 3] [--timeout-ms 30000]`
+1. `node dist/cli.js --law-id <law_id> [--max-depth 1] [--if-exists overwrite] [--retry 3] [--timeout-ms 30000]`
+2. `node dist/cli.js "<法令名>" [--max-depth 1] [--if-exists overwrite] [--retry 3] [--timeout-ms 30000]`
 3. `node dist/cli.js --build-dictionary [--dictionary data/law_dictionary.json]`
-4. `node dist/cli.js --law-id <law_id> [--max-depth 1] [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
-5. `node dist/cli.js "<法令名>" [--max-depth 1] [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
+4. `node dist/cli.js --law-id <law_id> [--max-depth 1] [--if-exists overwrite] [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
+5. `node dist/cli.js "<法令名>" [--max-depth 1] [--if-exists overwrite] [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 
 Dockerでの実行コマンド（正式手順）:
 1. `docker compose run --rm law-scraper --law-id 334AC0000000121`
@@ -66,6 +66,12 @@ Dockerでの実行コマンド（正式手順）:
 2. 深さ `1`（既定値）: 指定法令 + 参照先法令を1段まで取得
 3. 深さ `N`: 参照リンクを幅優先で最大 `N` 段まで再帰取得
 4. 同一 `law_id` は再取得しない（訪問済み集合で重複除去）
+
+`--if-exists` の動作:
+1. `overwrite`（既定値）: 既存ノートがあれば上書き再生成する
+2. `skip`: 既存ノートがあれば本文再生成をスキップする
+3. `skip` でも既存Markdownを読み、`[[laws/<safe_title>_<law_id>.md...]]` から参照先 `law_id` を抽出して再帰キューを継続する
+4. 参照先ノートが未存在なら通常どおり取得・生成する
 
 辞書関連オプションの動作:
 1. `--build-dictionary`:
@@ -180,8 +186,9 @@ Dockerでの実行コマンド（正式手順）:
 2. 本実装では非リンク文言に対して形態素解析や推測補完を行わない。
 
 9. 出力:
-1. `laws/<safe_title>_<law_id>.md` を上書き再生成
-2. `data/unresolved_refs.json` は追記
+1. `--if-exists=overwrite` の場合は `laws/<safe_title>_<law_id>.md` を上書き再生成
+2. `--if-exists=skip` の場合は既存ファイルを維持し、未存在ファイルのみ新規生成
+3. `data/unresolved_refs.json` は追記
 
 ## エラー処理・再試行
 
