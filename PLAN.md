@@ -50,6 +50,11 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 4. `node dist/cli.js --law-id <law_id> [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 5. `node dist/cli.js "<法令名>" [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 
+Dockerでの実行コマンド（正式手順）:
+1. `docker compose run --rm law-scraper --law-id 334AC0000000121`
+2. `docker compose run --rm law-scraper "特許法"`
+3. `docker compose run --rm law-scraper --build-dictionary`
+
 法令名入力時の動作:
 1. API `/api/2/laws?law_title=...` で候補取得
 2. 一意なら続行
@@ -144,7 +149,8 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 `href=\"/law/{law_id}\"` の `<target>` 決定規則:
 1. まず `data/law_dictionary.json` を参照し、`file_name` を採用
 2. 未登録 `law_id` は `law_<law_id>.md` へフォールバック
-3. フォールバック時は `data/unresolved_refs.json` に `reason=target_not_built` で追記
+3. 参照先ノートが未生成でもリンクは生成する（デッドリンク許容）
+4. 未生成・未登録の場合は `data/unresolved_refs.json` に `reason=target_not_built` で追記する
 
 補足:
 1. 非リンク文言（`a[href]` を持たない条文内参照）は `law_id` を確定できないため、リンク生成対象外とする。
@@ -195,6 +201,11 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 4. 抽出・変換・出力を順に実装
 5. 受け入れ基準を満たすまでRust CLIは併存
 6. 基準達成後にRust CLI削除
+
+Docker実行基盤の固定値:
+1. `docker-compose.yml` のサービス名は `law-scraper`
+2. ベースイメージは `mcr.microsoft.com/playwright:v1.58.2-jammy`（Ubuntu 22.04）
+3. エントリポイントは `node dist/cli.js` とし、`docker compose run` から引数のみ渡す
 
 ## Rust削除の受け入れ基準
 
