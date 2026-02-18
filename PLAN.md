@@ -2,118 +2,162 @@
 
 ## 概要
 
-`e-gov-jobun-to-obsidian` を Rust + API 依存構成から、Node.js + Playwright のスクレイピング主軸へ移行する。
-API利用は、法令名からlaw_idの取得など一部の利用にとどまることになる。
+`e-gov-jobun-to-obsidian` を Rust + API 依存構成から、Node.js + Playwright のスクレイピング主軸へ移行する。  
+API利用は法令名から `law_id` を取得する用途に限定する。
 
-取得対象は「本文 + 参照リンク情報」を `https://laws.e-gov.go.jp/law/{law_id}` から直接抽出し、Obsidian向けMarkdownを生成する。  
-失敗時は規定回数リトライする。
+取得対象は `https://laws.e-gov.go.jp/law/{law_id}` の実DOM（JS実行後）とし、本文・見出しアンカー・参照リンクを抽出して Obsidian 向け Markdown を生成する。
+
+## 実測で確認済みの事実（PoC）
+
+- 実行スクリプト: `scripts/poc_fetch_law.mjs`
+- 対象法令: `334AC0000000121`（特許法）
+- ダンプ保存先:
+1. `data/scrape_dumps/334AC0000000121/page.html`
+2. `data/scrape_dumps/334AC0000000121/summary.json`
+
+- 確認結果:
+1. `title`: `特許法 | e-Gov 法令検索`
+2. `textLength`: `124859`
+3. `hrefCount`: `2415`
+4. `第一条` / `附則` を本文テキストとして検出済み
+
+上記により「SPA実行後DOMから本文とリンクを取得可能」を前提として確定する。
 
 ## 目的
 
-APIから得られる法令文にはリンク情報が含まれておらず、自力でリンクを作る必要があり難易度が高い。
-他方、web `https://laws.e-gov.go.jp/law/{law_id}` ではハイパーリンクされているのでその情報を利用できる。
+1. API本文（リンクなし）を基準にした推測リンク解決を廃止する。
+2. e-Gov画面の実リンク情報を利用し、リンク精度を改善する。
+3. ダンプを残し、再現可能な検証サイクルを確立する。
 
 ## アーキテクチャ変更
 
 - 旧:
-
-1. Rust CLI（`reqwest`）で `/api/2/laws` `/api/2/law_data` を呼び出し。
-2. JSON構造を解析してMarkdown化。
+1. Rust CLI (`reqwest`) で `/api/2/laws` `/api/2/law_data` を呼び出し
+2. JSON構造を解析してMarkdown化
 
 - 新:
-
-1. Node CLI（TypeScript）を新規作成。
-2. Playwright で `laws.e-gov.go.jp` を操作。
-3. DOMから法令本文・見出しID・参照リンクを抽出。
-4. Markdownレンダラで `laws/*.md` を出力。
-5. 未解決参照ログ・辞書キャッシュは `data/` に保存。
+1. Node CLI（TypeScript）を新規作成
+2. Playwright で `/law/{law_id}` を開く
+3. 実DOMから本文・見出しID・リンクを抽出
+4. Markdownレンダラで `laws/*.md` を出力
+5. 未解決参照ログを `data/unresolved_refs.json` に追記
 
 ## 公開インターフェース（CLI）仕様
 
-- 新CLIコマンド（案）:
+1. `node dist/cli.js --law-id <law_id> [--retry 3] [--timeout-ms 30000]`
+2. `node dist/cli.js "<法令名>" [--retry 3] [--timeout-ms 30000]`
 
-1. `node dist/cli.js "<法令名>"
-   - こちらの場合は、APIでlaw_idを取得してからスクレイピングする
-   - 一意に定まらない場合は法令名とlaw_idのペアで情報出力して終了
-     - law_id を指定して再実行することで一意に定まることにになる
-2. `node dist/cli.js --law-id <law_id> ...`
-
-- 実行方式:
-
-1. 標準は Docker（Playwright公式イメージベース）。
-2. `docker compose run --rm app "<法令名>"` を正式手順とする。
-3. ローカル直実行は任意サポート（計画時点では必須にしない）。
+法令名入力時の動作:
+1. API `/api/2/laws?law_title=...` で候補取得
+2. 一意なら続行
+3. 複数候補なら候補一覧を機械可読JSONで標準出力し終了（対話問い合わせしない）
+4. このとき終了コードは `2`
 
 ## データ仕様
 
-- `laws/<safe_title>.md`
+### laws/<safe_title>.md
 
-1. 先頭にメタ情報(フロントマター): 法令名、law_id、取得時刻、取得元URL
-2. スクレイピングして得られた法令本文について、htmlに準じてアンカーを付与する
-3. 同じく、htmlのハイパーリンクに準じて Obsidianリンク化
+1. YAMLフロントマター:
+- `law_id`
+- `title`
+- `source_url`
+- `fetched_at`
+2. 本文はe-Gov DOMの論理構造（章/条/項）に沿って見出し化
+3. アンカーはe-Govの `id` を優先利用
+4. 参照リンクはObsidianリンクへ変換
+
+### data/unresolved_refs.json
+
+追記配列形式。1要素は次のキーを必須にする。
+1. `timestamp`
+2. `root_law_id`
+3. `root_law_title`
+4. `from_anchor`
+5. `raw_text`
+6. `href`（存在すれば）
+7. `reason`（`no_target_note` / `target_not_built` / `unknown_format`）
+
+重複判定キー: `root_law_id + from_anchor + raw_text + href`
 
 ## 取得・解析フロー（決定版）
 
-1. 入力（法令名 or law_id）を受理。
-2. 法令名の場合:
+1. 入力受理（法令名 or `--law-id`）
+2. 法令名ならAPIで `law_id` 解決
+3. Playwrightで `https://laws.e-gov.go.jp/law/{law_id}` へ遷移
+4. 待機順序:
+1. `domcontentloaded`
+2. `networkidle`
+3. 本文ルート候補セレクタのいずれか検出
 
-- APIで候補解決。
-- 一意でなければAPIで得られた候補の一覧を出力して終了
+5. 抽出セレクタ方針（優先順）:
+1. 本文ルート: `#MainProvision` → `#provisionview` → `main.main-content`
+2. 条文ブロック: `article.article[id]`
+3. 見出し: `.articleheading`, `.paragraphtitle`, `.istitle`
+4. 本文行: `p.sentence`
+5. 補助IDパターン: `[id^=\"Mp-\"]`, `[id^=\"Sup-\"]`, `[id^=\"App-\"]`, `[id^=\"Ap-\"]`, `[id^=\"Enf-\"]`
+6. リンク: `a[href]`
 
-3. Playwrightで法令ページへ遷移。
-4. 本文コンテナが表示されるまで待機（明示セレクタ + タイムアウト）。
-5. DOMからコンテンツを抽出
-6. Markdown生成時にリンク正規化
-7. ファイル出力:
+6. リンク正規化:
+1. `href^=\"#Mp-\"` を最優先で同一ノート内アンカーへ
+2. `href=\"#TOC\"` `href=\"#MainProvision\"` も同一ノート内アンカーへ
+3. `href=\"/law/{law_id}\"` は `laws/<target>.md` へ
+4. それ以外は外部リンクとして残す
+5. 解決不能はプレーンテキスト化して `unresolved_refs` へ記録
 
-- `laws/<safe_title>.md` は root law単位で再生成（同名は上書き）。
+7. 出力:
+1. `laws/<safe_title>.md` を上書き再生成
+2. `data/unresolved_refs.json` は追記
 
 ## エラー処理・再試行
 
-- フォールバック方針: API呼び直しはしない。
-- 再試行:
-
-1. ネットワーク失敗/DOM未表示時のみ最大 `--retry` 回。
-2. 各回で待機時間を指数バックオフ。
-3. 全失敗時は非0終了コード + エラーログ出力。
-4. 部分成功（本文生成済みで一部参照未解決）は成功終了し、未解決をログへ。
+1. リトライ対象: タイムアウト、ナビゲーション失敗、本文セレクタ未検出
+2. 既定 `--retry=3`
+3. バックオフ: 1s, 2s, 4s
+4. 全失敗時は終了コード `1`
+5. 部分成功（本文生成済みで未解決リンクあり）は終了コード `0`
 
 ## ファイル名長対策
 
-- 既存問題（`File name too long`）に対処:
-
-1. `safe_title` は正規化 + 文字数上限（例: 80）。
-2. 超過時は `title_trunc + "_" + law_id` を採用。
-3. 同名衝突時は law_id 優先で一意化。
+1. `safe_title` は正規化し最大80文字
+2. 超過時は `<truncated>_<law_id>.md`
+3. 衝突時は `law_id` 優先で一意化
 
 ## テスト計画
 
-- 単体テスト:
+### 単体テスト
+1. DOM断片から条文構造抽出
+2. `href` 正規化（内部/法令ページ/外部/未解決）
+3. ファイル名正規化
+4. 未解決重複判定
 
-1. DOM断片→条文構造抽出のパーサテスト。
-2. 参照リンク正規化（内部/外部/未解決）。
-3. ファイル名正規化と長さ制限。
+### フィクスチャテスト
+1. `data/scrape_dumps/334AC0000000121/page.html` からMarkdown生成
+2. 最低要件アサート:
+- `第一条` を含む
+- 内部アンカーリンクが1件以上
+- フロントマター必須キーが揃う
 
-- フィクスチャテスト:
-
-1. 実ページHTMLダンプ（ローカル保存）からMarkdown生成。
-2. 期待リンク数・未解決件数・主要見出し存在をアサート。
-
-- E2E（Docker）:
-
-1. <特許法のlaw_id> を入力して `laws/*.md` 生成確認。
-2. 同一入力再実行で安定出力（差分最小）確認。
+### E2E（Docker）
+1. `--law-id 334AC0000000121` で `laws/*.md` 生成
+2. 同入力2回で出力安定（不要差分なし）
 
 ## 移行手順
 
-1. Node/TSプロジェクト雛形追加（`package.json`, `tsconfig`, `src/`）。
-2. Dockerfile + compose定義をPlaywright向けに追加。
-3. 取得・抽出・変換・出力モジュールを段階実装。
-4. 既存Rust CLIは削除
+1. Node/TS雛形（`package.json`, `tsconfig`, `src/`）整備
+2. Docker実行基盤整備（Playwrightイメージ）
+3. 抽出・変換・出力を順に実装
+4. 受け入れ基準を満たすまでRust CLIは併存
+5. 基準達成後にRust CLI削除
 
-## 前提・仮定（明示）
+## Rust削除の受け入れ基準
 
-1. e-GovページはSPAで、静的HTMLに本文・リンクが直接埋まらないためJS実行が必要。
-2. 利用規約・アクセス制限は運用時に遵守し、過度な並列取得は行わない（デフォルト直列）。
-3. robots確認は現時点で明示取得できなかったため、保守的レート制御（1法令ずつ、待機あり）を既定とする。
-4. 既定言語・コメント方針は `AGENTS.md` に従い日本語で記述する。
+1. 特許法のE2Eが連続3回成功
+2. Markdownの主要セクション欠落がない
+3. 未解決ログが重複追記しない
+4. Docker環境で再現可能
+
+## 前提・運用制約
+
+1. e-GovはSPAのためJS実行が必須
+2. アクセスは直列実行を既定（過剰アクセス回避）
+3. コメント規約・日本語記述は `AGENTS.md` に従う
