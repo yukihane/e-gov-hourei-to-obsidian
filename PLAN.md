@@ -44,11 +44,11 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 ## 公開インターフェース（CLI）仕様
 
-1. `node dist/cli.js --law-id <law_id> [--retry 3] [--timeout-ms 30000]`
-2. `node dist/cli.js "<法令名>" [--retry 3] [--timeout-ms 30000]`
+1. `node dist/cli.js --law-id <law_id> [--max-depth 1] [--retry 3] [--timeout-ms 30000]`
+2. `node dist/cli.js "<法令名>" [--max-depth 1] [--retry 3] [--timeout-ms 30000]`
 3. `node dist/cli.js --build-dictionary [--dictionary data/law_dictionary.json]`
-4. `node dist/cli.js --law-id <law_id> [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
-5. `node dist/cli.js "<法令名>" [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
+4. `node dist/cli.js --law-id <law_id> [--max-depth 1] [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
+5. `node dist/cli.js "<法令名>" [--max-depth 1] [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 
 Dockerでの実行コマンド（正式手順）:
 1. `docker compose run --rm law-scraper --law-id 334AC0000000121`
@@ -60,6 +60,12 @@ Dockerでの実行コマンド（正式手順）:
 2. 一意なら続行
 3. 複数候補なら候補一覧を機械可読JSONで標準出力し終了（対話問い合わせしない）
 4. このとき終了コードは `2`
+
+`--max-depth` の動作:
+1. 深さ `0`: 指定法令のみ取得
+2. 深さ `1`（既定値）: 指定法令 + 参照先法令を1段まで取得
+3. 深さ `N`: 参照リンクを幅優先で最大 `N` 段まで再帰取得
+4. 同一 `law_id` は再取得しない（訪問済み集合で重複除去）
 
 辞書関連オプションの動作:
 1. `--build-dictionary`:
@@ -97,12 +103,13 @@ Dockerでの実行コマンド（正式手順）:
 4. `from_anchor`
 5. `raw_text`
 6. `href`（存在すれば）
-7. `reason`（`no_target_note` / `target_not_built` / `unknown_format`）
+7. `reason`（`no_target_note` / `target_not_built` / `unknown_format` / `depth_limit`）
 
 `reason` の使用条件:
 1. `target_not_built`: 参照先 `law_id` は判明したが、辞書未登録または参照先ノート未生成
 2. `no_target_note`: 参照先は判明したが、出力ポリシーによりリンク出力対象外
 3. `unknown_format`: `href` が想定形式（`#...` / `/law/{law_id}` / 外部URL）に一致しない
+4. `depth_limit`: `law_id` は判明したが、`--max-depth` の上限に達して取得対象外
 
 重複判定キー: `root_law_id + from_anchor + raw_text + href`
 
@@ -133,13 +140,15 @@ Dockerでの実行コマンド（正式手順）:
 
 1. 入力受理（法令名 or `--law-id`）
 2. 法令名ならAPIで `law_id` 解決
-3. Playwrightで `https://laws.e-gov.go.jp/law/{law_id}` へ遷移
-4. 待機順序:
+3. ルート法令を深さ `0` としてキューへ投入する
+4. キュー処理（幅優先）で法令を順に取得し、`depth <= max-depth` のものだけ処理する
+5. Playwrightで `https://laws.e-gov.go.jp/law/{law_id}` へ遷移
+6. 待機順序:
 1. `domcontentloaded`
 2. `networkidle`
 3. 本文ルート候補セレクタのいずれか検出
 
-5. 抽出セレクタ方針（優先順）:
+7. 抽出セレクタ方針（優先順）:
 1. 本文ルート: `#MainProvision` → `#provisionview` → `main.main-content`
 2. 条文ブロック: `article.article[id]`
 3. 見出し: `.articleheading`, `.paragraphtitle`, `.istitle`
@@ -147,7 +156,7 @@ Dockerでの実行コマンド（正式手順）:
 5. 補助IDパターン: `[id^=\"Mp-\"]`, `[id^=\"Sup-\"]`, `[id^=\"App-\"]`, `[id^=\"Ap-\"]`, `[id^=\"Enf-\"]`
 6. リンク: `a[href]`
 
-6. リンク正規化:
+8. リンク正規化:
 1. `href^=\"#Mp-\"` を最優先で同一ノート内アンカーへ
 2. `href=\"#TOC\"` `href=\"#MainProvision\"` も同一ノート内アンカーへ
 3. `href=\"/law/{law_id}\"` は `laws/<target>.md` へ
@@ -158,14 +167,15 @@ Dockerでの実行コマンド（正式手順）:
 `href=\"/law/{law_id}\"` の `<target>` 決定規則:
 1. まず `data/law_dictionary.json` を参照し、`file_name` を採用
 2. 未登録 `law_id` は `law_<law_id>.md` へフォールバック
-3. 参照先ノートが未生成でもリンクは生成する（デッドリンク許容）
-4. 未生成・未登録の場合は `data/unresolved_refs.json` に `reason=target_not_built` で追記する
+3. 参照先 `law_id` の深さが `max-depth` 以下なら取得キューへ追加する
+4. 参照先 `law_id` の深さが `max-depth` を超える場合でもリンクは生成し、`reason=depth_limit` で記録する
+5. 未生成・未登録の場合は `data/unresolved_refs.json` に `reason=target_not_built` で追記する
 
 補足:
 1. 非リンク文言（`a[href]` を持たない条文内参照）は `law_id` を確定できないため、リンク生成対象外とする。
 2. 本実装では非リンク文言に対して形態素解析や推測補完を行わない。
 
-7. 出力:
+9. 出力:
 1. `laws/<safe_title>_<law_id>.md` を上書き再生成
 2. `data/unresolved_refs.json` は追記
 
@@ -199,7 +209,7 @@ Dockerでの実行コマンド（正式手順）:
 - フロントマター必須キーが揃う
 
 ### E2E（Docker）
-1. `--law-id 334AC0000000121` で `laws/*.md` 生成
+1. `--law-id 334AC0000000121 --max-depth 1` で `laws/*.md` 生成
 2. 同入力2回で出力安定（不要差分なし）
 
 ## 移行手順
