@@ -46,12 +46,25 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 1. `node dist/cli.js --law-id <law_id> [--retry 3] [--timeout-ms 30000]`
 2. `node dist/cli.js "<法令名>" [--retry 3] [--timeout-ms 30000]`
+3. `node dist/cli.js --build-dictionary [--dictionary data/law_dictionary.json] [--limit N]`
+4. `node dist/cli.js --law-id <law_id> [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
+5. `node dist/cli.js "<法令名>" [--dictionary data/law_dictionary.json] [--dictionary-autoupdate]`
 
 法令名入力時の動作:
 1. API `/api/2/laws?law_title=...` で候補取得
 2. 一意なら続行
 3. 複数候補なら候補一覧を機械可読JSONで標準出力し終了（対話問い合わせしない）
 4. このとき終了コードは `2`
+
+辞書関連オプションの動作:
+1. `--build-dictionary`:
+- `/api/2/laws` を走査し `data/law_dictionary.json` を再生成する
+- `--limit N` 指定時は先頭 `N` 件のみでテスト生成する
+2. `--dictionary-autoupdate`:
+- 参照リンク解決中に未知の `law_id` が出たらAPIで都度取得し辞書へ追記する
+- 追記失敗時は `law_<law_id>.md` へフォールバックし `unresolved_refs` に記録する
+3. `--dictionary`:
+- 辞書ファイルの入出力パスを切り替える
 
 ## データ仕様
 
@@ -79,6 +92,29 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 重複判定キー: `root_law_id + from_anchor + raw_text + href`
 
+### data/law_dictionary.json
+
+`law_id` をキーに、リンク解決とファイル名生成に必要な最小情報を持つ。
+
+1. キー: `law_id`
+2. 値の必須キー:
+- `title`（現行法令名）
+- `safe_title`（ファイル名用に正規化・短縮済み）
+- `file_name`（`<safe_title>_<law_id>.md`）
+- `updated_at`（辞書更新日時）
+
+例:
+```json
+{
+  "334AC0000000121": {
+    "title": "特許法",
+    "safe_title": "特許法",
+    "file_name": "特許法_334AC0000000121.md",
+    "updated_at": "2026-02-18T12:00:00Z"
+  }
+}
+```
+
 ## 取得・解析フロー（決定版）
 
 1. 入力受理（法令名 or `--law-id`）
@@ -103,6 +139,16 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 3. `href=\"/law/{law_id}\"` は `laws/<target>.md` へ
 4. それ以外は外部リンクとして残す
 5. 解決不能はプレーンテキスト化して `unresolved_refs` へ記録
+6. `a[href]` を持たない参照文言は推測リンク化しない（プレーンテキストのまま出力）
+
+`href=\"/law/{law_id}\"` の `<target>` 決定規則:
+1. まず `data/law_dictionary.json` を参照し、`file_name` を採用
+2. 未登録 `law_id` は `law_<law_id>.md` へフォールバック
+3. フォールバック時は `data/unresolved_refs.json` に `reason=target_not_built` で追記
+
+補足:
+1. 非リンク文言（`a[href]` を持たない条文内参照）は `law_id` を確定できないため、リンク生成対象外とする。
+2. 本実装では非リンク文言に対して形態素解析や推測補完を行わない。
 
 7. 出力:
 1. `laws/<safe_title>.md` を上書き再生成
@@ -145,9 +191,10 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 1. Node/TS雛形（`package.json`, `tsconfig`, `src/`）整備
 2. Docker実行基盤整備（Playwrightイメージ）
-3. 抽出・変換・出力を順に実装
-4. 受け入れ基準を満たすまでRust CLIは併存
-5. 基準達成後にRust CLI削除
+3. 辞書生成機能を実装（`--build-dictionary` で `/api/2/laws` から `data/law_dictionary.json` を構築）
+4. 抽出・変換・出力を順に実装
+5. 受け入れ基準を満たすまでRust CLIは併存
+6. 基準達成後にRust CLI削除
 
 ## Rust削除の受け入れ基準
 
