@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
@@ -102,6 +103,8 @@ interface LawDataResponse {
   law_info?: Record<string, unknown>;
   revision_info?: Record<string, unknown>;
 }
+
+type ExistingNoteIndex = Map<string, string[]>;
 
 /**
  * CLI引数を解釈し、処理に必要なオプションを構築する。
@@ -774,6 +777,76 @@ function notePath(outputDir: string, fileName: string): string {
   return path.join(outputDir, fileName);
 }
 
+function parseLawIdFromNoteFileName(fileName: string): string | undefined {
+  const matched = fileName.match(/_([A-Za-z0-9]+)\.md$/);
+  if (!matched) {
+    return undefined;
+  }
+  return matched[1];
+}
+
+function addExistingNoteIndex(index: ExistingNoteIndex, lawId: string, filePath: string): void {
+  const paths = index.get(lawId) ?? [];
+  if (!paths.includes(filePath)) {
+    paths.push(filePath);
+    paths.sort((a, b) => a.localeCompare(b));
+    index.set(lawId, paths);
+  }
+}
+
+/**
+ * `laws` 配下を走査し、`law_id -> 既存ノートパス一覧` の索引を構築する。
+ * skip時に辞書のfile_nameが古くても既存ファイルを見つけるために必要。
+ */
+export async function buildExistingNoteIndex(outputDir: string): Promise<ExistingNoteIndex> {
+  const index: ExistingNoteIndex = new Map();
+  let entries: Dirent[] = [];
+  try {
+    entries = await fs.readdir(outputDir, { withFileTypes: true });
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === 'ENOENT') {
+      return index;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.md')) {
+      continue;
+    }
+    const lawId = parseLawIdFromNoteFileName(entry.name);
+    if (!lawId) {
+      continue;
+    }
+    addExistingNoteIndex(index, lawId, path.join(outputDir, entry.name));
+  }
+  return index;
+}
+
+/**
+ * skip判定用に既存ノートの実体パスを解決する。
+ * 辞書名が存在する場合はそれを優先し、なければ同一law_idの既存ファイルを返す。
+ */
+export async function resolveExistingNotePath(
+  outputDir: string,
+  lawId: string,
+  dictFileName: string,
+  existingIndex: ExistingNoteIndex,
+): Promise<string | undefined> {
+  const dictPath = notePath(outputDir, dictFileName);
+  try {
+    await fs.access(dictPath);
+    return dictPath;
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  const candidates = existingIndex.get(lawId) ?? [];
+  return candidates[0];
+}
+
 /**
  * 既存Markdown中のObsidianリンクから参照先law_idを抽出する。
  * skipモードでも再帰収集を継続するために必要。
@@ -840,6 +913,8 @@ async function processLawGraph(
   dictionary: LawDictionary,
 ): Promise<void> {
   await ensureOutputDir(options.outputDir);
+  const existingIndex: ExistingNoteIndex =
+    options.ifExists === 'skip' ? await buildExistingNoteIndex(options.outputDir) : new Map();
 
   const queue: QueueItem[] = [{ lawId: rootLawId, titleHint: rootLawTitle, depth: 0 }];
   const visited = new Set<string>();
@@ -868,22 +943,29 @@ async function processLawGraph(
     };
     dictionary[item.lawId] = dictEntry;
 
-    const filePath = notePath(options.outputDir, dictEntry.file_name);
-
     if (options.ifExists === 'skip') {
-      try {
-        const existingMarkdown = await fs.readFile(filePath, 'utf8');
+      const existingNotePath = await resolveExistingNotePath(
+        options.outputDir,
+        item.lawId,
+        dictEntry.file_name,
+        existingIndex,
+      );
+      if (existingNotePath) {
+        const existingMarkdown = await fs.readFile(existingNotePath, 'utf8');
         const scan = scanReferencedLawIdsFromMarkdown(existingMarkdown);
         for (const lawId of scan.referencedLawIds) {
           queue.push({ lawId, depth: item.depth + 1 });
         }
-        process.stdout.write(`skip existing: ${dictEntry.file_name}\n`);
-        continue;
-      } catch (error) {
-        const maybeNodeError = error as NodeJS.ErrnoException;
-        if (maybeNodeError.code !== 'ENOENT') {
-          throw error;
+        const existingFileName = path.basename(existingNotePath);
+        if (dictEntry.file_name !== existingFileName) {
+          dictionary[item.lawId] = {
+            ...dictEntry,
+            file_name: existingFileName,
+            updated_at: new Date().toISOString(),
+          };
         }
+        process.stdout.write(`skip existing: ${existingFileName}\n`);
+        continue;
       }
     }
 
@@ -934,7 +1016,9 @@ async function processLawGraph(
       await writeJson(options.dictionaryPath, dictionary);
     }
 
-    await fs.writeFile(notePath(options.outputDir, freshFileName), rendered.markdown, 'utf8');
+    const freshFilePath = notePath(options.outputDir, freshFileName);
+    await fs.writeFile(freshFilePath, rendered.markdown, 'utf8');
+    addExistingNoteIndex(existingIndex, item.lawId, freshFilePath);
 
     for (const lawId of rendered.referencedLawIds) {
       queue.push({ lawId, depth: item.depth + 1 });

@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
-import { parseLawIdFromHref, scanReferencedLawIdsFromMarkdown, toSafeTitle } from './cli.js';
+import {
+  buildExistingNoteIndex,
+  parseLawIdFromHref,
+  resolveExistingNotePath,
+  scanReferencedLawIdsFromMarkdown,
+  toSafeTitle,
+} from './cli.js';
 
 test('parseLawIdFromHref: 相対URLを解析できる', () => {
   const parsed = parseLawIdFromHref('/law/334AC0000000121#Mp-At_1');
@@ -34,4 +43,24 @@ test('scanReferencedLawIdsFromMarkdown: Obsidianリンクからlaw_idを抽出',
   ].join('\n');
   const scanned = scanReferencedLawIdsFromMarkdown(markdown);
   assert.deepEqual(scanned.referencedLawIds.sort(), ['334AC0000000121', '345AC0000000082']);
+});
+
+test('buildExistingNoteIndex: laws配下からlaw_id索引を構築できる', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'laws-index-'));
+  await fs.writeFile(path.join(tmp, '特許法_334AC0000000121.md'), '# dummy', 'utf8');
+  await fs.writeFile(path.join(tmp, 'note.md'), '# noop', 'utf8');
+
+  const index = await buildExistingNoteIndex(tmp);
+  assert.deepEqual(index.get('334AC0000000121'), [path.join(tmp, '特許法_334AC0000000121.md')]);
+  assert.equal(index.get('NO_SUCH_ID'), undefined);
+});
+
+test('resolveExistingNotePath: 辞書名がなくてもlaw_id一致の既存ノートを返す', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'laws-resolve-'));
+  const existingPath = path.join(tmp, '特許法_334AC0000000121.md');
+  await fs.writeFile(existingPath, '# dummy', 'utf8');
+
+  const index = await buildExistingNoteIndex(tmp);
+  const resolved = await resolveExistingNotePath(tmp, '334AC0000000121', 'law_334AC0000000121.md', index);
+  assert.equal(resolved, existingPath);
 });
