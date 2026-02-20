@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
 import { chromium } from 'playwright';
-import { extractLawDocumentFromPage, renderMarkdownForTest } from './cli.js';
+import { extractLawDocumentFromPage, renderMarkdownForTest } from './index.js';
 
 test('fixture: 保存済みHTMLからMarkdown生成できる', async (t) => {
   const html = await fs.readFile('data/scrape_dumps/334AC0000000121/page.html', 'utf8');

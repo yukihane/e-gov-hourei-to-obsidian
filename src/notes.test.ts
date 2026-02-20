@@ -6,27 +6,10 @@ import path from 'node:path';
 
 import {
   buildExistingNoteIndex,
-  mergeUnresolvedRecords,
-  parseLawIdFromHref,
   resolveExistingNotePath,
   scanReferencedLawIdsFromMarkdown,
   toSafeTitle,
-} from './cli.js';
-
-test('parseLawIdFromHref: 相対URLを解析できる', () => {
-  const parsed = parseLawIdFromHref('/law/334AC0000000121#Mp-At_1');
-  assert.deepEqual(parsed, { lawId: '334AC0000000121', anchor: 'Mp-At_1' });
-});
-
-test('parseLawIdFromHref: 絶対URLを解析できる', () => {
-  const parsed = parseLawIdFromHref('https://laws.e-gov.go.jp/law/345AC0000000082');
-  assert.deepEqual(parsed, { lawId: '345AC0000000082', anchor: undefined });
-});
-
-test('parseLawIdFromHref: 非法令URLは未解釈', () => {
-  assert.equal(parseLawIdFromHref('https://example.com/x'), undefined);
-  assert.equal(parseLawIdFromHref('/api/2/laws'), undefined);
-});
+} from './index.js';
 
 test('toSafeTitle: ファイル名禁則文字を置換し80文字に制限する', () => {
   const raw = '法/令:*?"<>| テスト';
@@ -64,40 +47,4 @@ test('resolveExistingNotePath: 辞書名がなくてもlaw_id一致の既存ノ�
   const index = await buildExistingNoteIndex(tmp);
   const resolved = await resolveExistingNotePath(tmp, '334AC0000000121', 'law_334AC0000000121.md', index);
   assert.equal(resolved, existingPath);
-});
-
-test('mergeUnresolvedRecords: 同一キーを重複追加しない', () => {
-  const existing = [
-    {
-      timestamp: '2026-02-20T00:00:00Z',
-      root_law_id: '334AC0000000121',
-      root_law_title: '特許法',
-      from_anchor: 'Mp-At_1',
-      raw_text: '民法',
-      href: '/law/129AC0000000089',
-      reason: 'target_not_built' as const,
-    },
-  ];
-  const incoming = [
-    {
-      timestamp: '2026-02-20T01:00:00Z',
-      root_law_id: '334AC0000000121',
-      root_law_title: '特許法',
-      from_anchor: 'Mp-At_1',
-      raw_text: '民法',
-      href: '/law/129AC0000000089',
-      reason: 'target_not_built' as const,
-    },
-    {
-      timestamp: '2026-02-20T01:00:00Z',
-      root_law_id: '334AC0000000121',
-      root_law_title: '特許法',
-      from_anchor: 'Mp-At_2',
-      raw_text: '刑法',
-      href: '/law/140AC0000000045',
-      reason: 'target_not_built' as const,
-    },
-  ];
-  const merged = mergeUnresolvedRecords(existing, incoming);
-  assert.equal(merged.length, 2);
 });

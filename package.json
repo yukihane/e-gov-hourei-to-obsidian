@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "start": "node dist/cli.js",
     "test": "pnpm build && node --test dist/**/*.test.js",
     "test:e2e:docker": "bash scripts/e2e_docker.sh",
