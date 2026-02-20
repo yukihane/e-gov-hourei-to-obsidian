@@ -51,6 +51,8 @@ interface UnresolvedRefRecord {
   reason: 'target_not_built' | 'unknown_format' | 'depth_limit';
 }
 
+type UnresolvedRecordKey = string;
+
 interface SegmentText {
   type: 'text';
   text: string;
@@ -548,6 +550,26 @@ function unresolvedKey(item: UnresolvedRefRecord): string {
   return `${item.root_law_id}\t${item.from_anchor}\t${item.raw_text}\t${item.href}`;
 }
 
+/**
+ * 未解決参照配列を重複キーでマージする。
+ * append時の重複判定ロジックを純粋関数化し、単体テスト可能にする。
+ */
+export function mergeUnresolvedRecords(
+  existing: UnresolvedRefRecord[],
+  incoming: UnresolvedRefRecord[],
+): UnresolvedRefRecord[] {
+  const seen = new Set<UnresolvedRecordKey>(existing.map((item) => unresolvedKey(item)));
+  const merged = [...existing];
+  for (const item of incoming) {
+    const key = unresolvedKey(item);
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
 function collectReferencedLawIds(doc: ScrapedLawDocument): string[] {
   const ids = new Set<string>();
   for (const block of doc.blocks) {
@@ -888,18 +910,36 @@ async function loadExistingUnresolved(filePath: string): Promise<UnresolvedRefRe
 
 async function appendUnresolved(filePath: string, items: UnresolvedRefRecord[]): Promise<void> {
   const existing = await loadExistingUnresolved(filePath);
-  const seen = new Set(existing.map((item) => unresolvedKey(item)));
-  const merged = [...existing];
+  const merged = mergeUnresolvedRecords(existing, items);
+  await writeJson(filePath, merged);
+}
 
-  for (const item of items) {
-    const key = unresolvedKey(item);
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(item);
+async function removeOldNoteIfRenamed(
+  outputDir: string,
+  oldFileName: string,
+  newFileName: string,
+  existingIndex: ExistingNoteIndex,
+  lawId: string,
+): Promise<void> {
+  if (!oldFileName || oldFileName === newFileName) {
+    return;
+  }
+  const oldPath = notePath(outputDir, oldFileName);
+  try {
+    await fs.unlink(oldPath);
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== 'ENOENT') {
+      throw error;
     }
   }
-
-  await writeJson(filePath, merged);
+  const current = existingIndex.get(lawId) ?? [];
+  const filtered = current.filter((candidate) => path.basename(candidate) !== oldFileName);
+  if (filtered.length > 0) {
+    existingIndex.set(lawId, filtered);
+  } else {
+    existingIndex.delete(lawId);
+  }
 }
 
 /**
@@ -972,6 +1012,7 @@ async function processLawGraph(
     process.stdout.write(`取得中: ${dictEntry.title} (${item.lawId}) depth=${item.depth}\n`);
 
     const scraped = await scrapeLawDocumentWithRetry(item.lawId, options);
+    const previousFileName = dictEntry.file_name;
 
     const freshFileName = getFileName(item.lawId, scraped.title);
     dictionary[item.lawId] = {
@@ -1018,6 +1059,13 @@ async function processLawGraph(
 
     const freshFilePath = notePath(options.outputDir, freshFileName);
     await fs.writeFile(freshFilePath, rendered.markdown, 'utf8');
+    await removeOldNoteIfRenamed(
+      options.outputDir,
+      previousFileName,
+      freshFileName,
+      existingIndex,
+      item.lawId,
+    );
     addExistingNoteIndex(existingIndex, item.lawId, freshFilePath);
 
     for (const lawId of rendered.referencedLawIds) {
