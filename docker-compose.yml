@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     image: e-gov-jobun-to-obsidian:latest
     working_dir: /app
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     init: true
     shm_size: "1gb"
     environment:
