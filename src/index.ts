@@ -1,5 +1,5 @@
 import { parseArgs } from './args.js';
-import { buildDictionary, resolveLawIdByTitle } from './api.js';
+import { buildDictionary, fetchLawTitleById, resolveLawIdByTitle } from './api.js';
 import { processLawGraph } from './process.js';
 import { loadDictionary, mergeUnresolvedRecords } from './storage.js';
 
@@ -12,6 +12,10 @@ export {
   toSafeTitle,
 } from './notes.js';
 export { mergeUnresolvedRecords };
+
+function isFallbackTitle(title: string): boolean {
+  return /^law_[A-Za-z0-9]+$/.test(title);
+}
 
 /**
  * CLIのメイン処理を実行する。
@@ -42,5 +46,16 @@ export async function runCli(argv: string[]): Promise<void> {
     throw new Error('law_id がありません');
   }
 
-  await processLawGraph(options, rootLawId, rootTitle ?? `law_${rootLawId}`, dictionary);
+  if (!rootTitle) {
+    const dictTitle = dictionary[rootLawId]?.title;
+    if (dictTitle && !isFallbackTitle(dictTitle)) {
+      rootTitle = dictTitle;
+    } else if (options.dictionaryAutoupdate) {
+      rootTitle = (await fetchLawTitleById(options, rootLawId)) ?? `law_${rootLawId}`;
+    } else {
+      rootTitle = `law_${rootLawId}`;
+    }
+  }
+
+  await processLawGraph(options, rootLawId, rootTitle, dictionary);
 }

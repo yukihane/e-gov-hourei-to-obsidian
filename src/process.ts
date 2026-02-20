@@ -19,6 +19,10 @@ async function ensureOutputDir(outputDir: string): Promise<void> {
   await fs.mkdir(outputDir, { recursive: true });
 }
 
+function isFallbackTitle(title: string): boolean {
+  return /^law_[A-Za-z0-9]+$/.test(title);
+}
+
 async function removeOldNoteIfRenamed(
   outputDir: string,
   oldFileName: string,
@@ -118,10 +122,27 @@ export async function processLawGraph(
     const scraped = await scrapeLawDocumentWithRetry(item.lawId, options);
     const previousFileName = dictEntry.file_name;
 
-    const freshFileName = getFileName(item.lawId, scraped.title);
+    let resolvedTitle = dictEntry.title;
+    if (!resolvedTitle || isFallbackTitle(resolvedTitle)) {
+      if (options.dictionaryAutoupdate) {
+        try {
+          const fetchedTitle = await fetchLawTitleById(options, item.lawId);
+          if (fetchedTitle) {
+            resolvedTitle = fetchedTitle;
+          }
+        } catch {
+          // タイトル補完に失敗しても本文生成は継続する。
+        }
+      }
+      if (!resolvedTitle || isFallbackTitle(resolvedTitle)) {
+        resolvedTitle = scraped.title;
+      }
+    }
+
+    const freshFileName = getFileName(item.lawId, resolvedTitle);
     dictionary[item.lawId] = {
-      title: scraped.title,
-      safe_title: toSafeTitle(scraped.title),
+      title: resolvedTitle,
+      safe_title: toSafeTitle(resolvedTitle),
       file_name: freshFileName,
       updated_at: new Date().toISOString(),
     };

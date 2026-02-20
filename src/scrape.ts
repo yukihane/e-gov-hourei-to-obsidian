@@ -37,10 +37,24 @@ export async function extractLawDocumentFromPage(
       throw new Error('本文セレクタ未検出');
     }
 
-    const title =
-      document.querySelector('h1')?.textContent?.trim() ??
-      document.title.replace(' | e-Gov 法令検索', '').trim() ??
-      '無題法令';
+    const titleElement =
+      document.querySelector<HTMLElement>('#titlebar .title-law .lawlabel') ??
+      document.querySelector<HTMLElement>('.lawdetaillawtitle') ??
+      document.querySelector<HTMLElement>('main.main-content h1');
+
+    let title = '';
+    if (titleElement) {
+      const clone = titleElement.cloneNode(true) as HTMLElement;
+      // 法令番号などを除いて純粋な法令名を優先取得する。
+      clone.querySelectorAll('.lawnumber').forEach((node) => node.remove());
+      title = clone.textContent?.trim() ?? '';
+    }
+    if (!title) {
+      title = document.title.replace(' | e-Gov 法令検索', '').trim();
+    }
+    if (!title) {
+      title = '無題法令';
+    }
 
     const articleNodes = Array.from(provisionRoot.querySelectorAll<HTMLElement>('article.article[id]'));
     const fallbackArticleNodes =
@@ -114,7 +128,13 @@ export async function extractLawDocumentFromPage(
 }
 
 async function scrapeLawDocument(lawId: string, options: CliOptions): Promise<ScrapedLawDocument> {
-  const browser = await chromium.launch({ headless: true });
+  const isInDocker = process.env.IN_DOCKER === '1';
+  const browser = await chromium.launch({
+    headless: true,
+    // Docker環境では sandbox / shared memory 制約でブラウザが早期終了しやすいため、
+    // コンテナ実行時のみ安全側オプションを有効化する。
+    args: isInDocker ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] : [],
+  });
   const page = await browser.newPage();
   const sourceUrl = `${getLawSiteBaseUrl(options.apiBaseUrl)}/law/${lawId}`;
 
@@ -122,7 +142,9 @@ async function scrapeLawDocument(lawId: string, options: CliOptions): Promise<Sc
     await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
     await page.waitForLoadState('networkidle', { timeout: options.timeoutMs }).catch(() => undefined);
     await waitForProvisionRoot(page, options.timeoutMs);
-    return extractLawDocumentFromPage(page, lawId, sourceUrl);
+    // finallyでbrowser.close()する前に抽出完了まで待たないと、
+    // page.evaluate中にページが閉じられて失敗する。
+    return await extractLawDocumentFromPage(page, lawId, sourceUrl);
   } finally {
     await browser.close();
   }

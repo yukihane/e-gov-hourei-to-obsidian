@@ -5,6 +5,10 @@ services:
       dockerfile: Dockerfile
     image: e-gov-jobun-to-obsidian:latest
     working_dir: /app
+    init: true
+    shm_size: "1gb"
+    environment:
+      - IN_DOCKER=1
     volumes:
       - ./laws:/app/laws
       - ./data:/app/data
