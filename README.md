@@ -17,7 +17,7 @@ README の主手順はすべて Docker ベースです。
 - Docker
 - Docker Compose
 
-`laws/` と `data/` の所有者をホスト実行ユーザーに合わせるため、以降の実行では `HOST_UID/HOST_GID` を付与します。
+`./law-scraper.sh` は内部で `HOST_UID/HOST_GID` を設定して `docker compose run` を呼び出します。
 
 ## 初回セットアップ（Docker）
 
@@ -26,7 +26,7 @@ README の主手順はすべて Docker ベースです。
 法令名ベースのファイル名と参照解決精度を安定させるため、最初に `--build-dictionary` を実行します。
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --build-dictionary
+./law-scraper.sh --build-dictionary
 ```
 
 生成先:
@@ -37,13 +37,13 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 `law_id` 指定:
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121
+./law-scraper.sh --law-id 334AC0000000121
 ```
 
 法令名指定:
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper "特許法"
+./law-scraper.sh "特許法"
 ```
 
 生成先:
@@ -55,13 +55,13 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 ### 既存ノートを活かして追記取得したい場合
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --if-exists skip --max-depth 1
+./law-scraper.sh --law-id 334AC0000000121 --if-exists skip --max-depth 1
 ```
 
 ### 常に作り直したい場合
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --if-exists overwrite
+./law-scraper.sh --law-id 334AC0000000121 --if-exists overwrite
 ```
 
 ## オプション利用ガイド（Docker）
@@ -80,7 +80,7 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 例:
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --dictionary-autoupdate
+./law-scraper.sh --law-id 334AC0000000121 --dictionary-autoupdate
 ```
 
 ### `--unresolved-path`
@@ -95,7 +95,7 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 例:
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --unresolved-path data/unresolved_refs_run_$(date +%Y%m%d).json
+./law-scraper.sh --law-id 334AC0000000121 --unresolved-path data/unresolved_refs_run_$(date +%Y%m%d).json
 ```
 
 ### `--dictionary`
@@ -103,7 +103,7 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 辞書を用途別に分けたい場合に使用します。
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --dictionary data/law_dictionary_custom.json
+./law-scraper.sh --law-id 334AC0000000121 --dictionary data/law_dictionary_custom.json
 ```
 
 ## テスト
@@ -125,7 +125,7 @@ Docker E2E（2回実行して出力差分確認）:
 辞書未作成/古い可能性があります。先に辞書を再生成してください。
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --build-dictionary
+./law-scraper.sh --build-dictionary
 ```
 
 ### `permission denied`（`laws/*.md`）
@@ -136,7 +136,7 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 sudo chown -R "$(id -u):$(id -g)" laws data
 ```
 
-実行時は `HOST_UID/HOST_GID` を付けてください。
+以降は `./law-scraper.sh ...` を使って実行してください。
 
 ### `ERR_PNPM_OUTDATED_LOCKFILE`
 
@@ -151,7 +151,7 @@ sudo chown -R "$(id -u):$(id -g)" laws data
 イメージ更新漏れがある可能性があります。`--build` を付けて再実行してください。
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121
+./law-scraper.sh --law-id 334AC0000000121
 ```
 
 ## 補足: ローカル実行（オプション）
