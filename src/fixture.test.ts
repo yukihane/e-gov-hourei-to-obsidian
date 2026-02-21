@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 import { extractLawDocumentFromPage, renderMarkdownForTest } from './index.js';
 
 test('fixture: 保存済みHTMLからMarkdown生成できる', async (t) => {
-  const html = await fs.readFile('data/scrape_dumps/334AC0000000121/page.html', 'utf8');
+  const html = await fs.readFile('tests/fixtures/scrape_dumps/334AC0000000121/page.html', 'utf8');
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
