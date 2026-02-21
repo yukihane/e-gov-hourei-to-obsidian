@@ -1,4 +1,4 @@
-# e-gov-jobun-to-obsidian
+# e-gov-hourei-to-obsidian
 
 e-Gov 法令検索の法令本文を取得し、Obsidian 向け Markdown (`laws/*.md`) を生成する CLI です。
 
@@ -8,6 +8,7 @@ e-Gov 法令検索の法令本文を取得し、Obsidian 向け Markdown (`laws/
 README の主手順はすべて Docker ベースです。
 
 理由:
+
 - 実行環境の差異を減らせる
 - Playwright の依存をコンテナ側に閉じ込められる
 - `laws/` / `data/` の権限管理を一貫化できる
@@ -30,6 +31,7 @@ README の主手順はすべて Docker ベースです。
 ```
 
 生成先:
+
 - `data/law_dictionary.json`
 
 ### 2. 本文を生成する
@@ -47,6 +49,7 @@ README の主手順はすべて Docker ベースです。
 ```
 
 生成先:
+
 - 法令ノート: `laws/*.md`
 - 未解決参照ログ: `data/unresolved_refs.json`
 
@@ -69,11 +72,13 @@ README の主手順はすべて Docker ベースです。
 ### `--dictionary-autoupdate`
 
 **使うとよい場面**:
+
 - 辞書を最近更新していない
 - 深い参照先まで辿ると未知 `law_id` が多い
 - `law_<id>.md` へのフォールバックを減らしたい
 
 **使わなくてよい場面**:
+
 - 事前に `--build-dictionary` 済みで運用している
 - 実行時のAPI追加アクセスを避けたい
 
@@ -86,10 +91,12 @@ README の主手順はすべて Docker ベースです。
 ### `--unresolved-path`
 
 **使うとよい場面**:
+
 - 実行ごとに未解決ログを分けたい
 - CIや調査でログ衝突を避けたい
 
 **既定でよい場面**:
+
 - 通常運用で単一ログで十分
 
 例:
