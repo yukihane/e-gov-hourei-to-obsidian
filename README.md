@@ -177,8 +177,8 @@ sudo chown -R "$(id -u):$(id -g)" laws data
 Docker を使えない環境向けです。通常は Docker 実行を優先してください。
 
 ```bash
-/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm install
-/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm build
+pnpm install
+pnpm build
 node dist/cli.js --build-dictionary
 node dist/cli.js --law-id 334AC0000000121
 ```
