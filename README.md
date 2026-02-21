@@ -2,41 +2,39 @@
 
 e-Gov 法令検索の法令本文を取得し、Obsidian 向け Markdown (`laws/*.md`) を生成する CLI です。
 
+## 標準実行は Docker
+
+このプロジェクトは **Docker 実行を標準** とします。  
+README の主手順はすべて Docker ベースです。
+
+理由:
+- 実行環境の差異を減らせる
+- Playwright の依存をコンテナ側に閉じ込められる
+- `laws/` / `data/` の権限管理を一貫化できる
+
 ## 前提
 
-- Node.js 20+
-- pnpm (`/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm`)
-- Docker / Docker Compose（Docker実行時）
+- Docker
+- Docker Compose
 
-## ローカル実行
+`laws/` と `data/` の所有者をホスト実行ユーザーに合わせるため、以降の実行では `HOST_UID/HOST_GID` を付与します。
 
-1. 依存インストール
+## 初回セットアップ（Docker）
 
-```bash
-/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm install
-```
+### 1. 辞書を最初に作成する
 
-2. ビルド
+法令名ベースのファイル名と参照解決精度を安定させるため、最初に `--build-dictionary` を実行します。
 
 ```bash
-/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm build
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --build-dictionary
 ```
 
-3. 実行（law_id 指定）
+生成先:
+- `data/law_dictionary.json`
 
-```bash
-node dist/cli.js --law-id 334AC0000000121
-```
+### 2. 本文を生成する
 
-4. 実行（法令名指定）
-
-```bash
-node dist/cli.js "特許法"
-```
-
-## Docker実行
-
-`laws/` と `data/` をホストユーザー権限で作成・更新するため、`HOST_UID/HOST_GID` を渡して実行します。
+`law_id` 指定:
 
 ```bash
 HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121
@@ -48,30 +46,65 @@ HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper 
 HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper "特許法"
 ```
 
-## 辞書の作成
+生成先:
+- 法令ノート: `laws/*.md`
+- 未解決参照ログ: `data/unresolved_refs.json`
 
-法令名ベースのファイル名・リンク解決精度のために、先に辞書を作ることを推奨します。
+## 日常運用（Docker）
 
-```bash
-node dist/cli.js --build-dictionary
-```
-
-Docker:
+### 既存ノートを活かして追記取得したい場合
 
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --build-dictionary
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --if-exists skip --max-depth 1
 ```
 
-## 主なオプション
+### 常に作り直したい場合
 
-- `--law-id <id>`: ルート法令ID指定
-- `<法令名>`: ルート法令名指定
-- `--max-depth <n>`: 参照先法令の再帰深さ（既定 `1`）
-- `--if-exists overwrite|skip`: 既存ノートの扱い
-- `--build-dictionary`: `data/law_dictionary.json` を再生成
-- `--dictionary <path>`: 辞書ファイルパス
-- `--dictionary-autoupdate`: 未知 `law_id` をAPI照会して辞書追記
-- `--unresolved-path <path>`: 未解決参照ログ出力先
+```bash
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --if-exists overwrite
+```
+
+## オプション利用ガイド（Docker）
+
+### `--dictionary-autoupdate`
+
+**使うとよい場面**:
+- 辞書を最近更新していない
+- 深い参照先まで辿ると未知 `law_id` が多い
+- `law_<id>.md` へのフォールバックを減らしたい
+
+**使わなくてよい場面**:
+- 事前に `--build-dictionary` 済みで運用している
+- 実行時のAPI追加アクセスを避けたい
+
+例:
+
+```bash
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --dictionary-autoupdate
+```
+
+### `--unresolved-path`
+
+**使うとよい場面**:
+- 実行ごとに未解決ログを分けたい
+- CIや調査でログ衝突を避けたい
+
+**既定でよい場面**:
+- 通常運用で単一ログで十分
+
+例:
+
+```bash
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --unresolved-path data/unresolved_refs_run_$(date +%Y%m%d).json
+```
+
+### `--dictionary`
+
+辞書を用途別に分けたい場合に使用します。
+
+```bash
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121 --dictionary data/law_dictionary_custom.json
+```
 
 ## テスト
 
@@ -85,20 +118,14 @@ Docker E2E（2回実行して出力差分確認）:
 /home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm test:e2e:docker
 ```
 
-## 出力
+## トラブルシュート（Docker）
 
-- 法令ノート: `laws/*.md`
-- 辞書: `data/law_dictionary.json`
-- 未解決参照: `data/unresolved_refs.json`
+### `law_<id>.md` の名前になる
 
-## よくあるエラー
-
-### `ERR_PNPM_OUTDATED_LOCKFILE`
-
-`package.json` と `pnpm-lock.yaml` の不整合です。
+辞書未作成/古い可能性があります。先に辞書を再生成してください。
 
 ```bash
-/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm install
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --build-dictionary
 ```
 
 ### `permission denied`（`laws/*.md`）
@@ -109,4 +136,31 @@ Docker E2E（2回実行して出力差分確認）:
 sudo chown -R "$(id -u):$(id -g)" laws data
 ```
 
-その後、Docker実行時に `HOST_UID/HOST_GID` を渡してください。
+実行時は `HOST_UID/HOST_GID` を付けてください。
+
+### `ERR_PNPM_OUTDATED_LOCKFILE`
+
+`package.json` と `pnpm-lock.yaml` の不整合です。
+
+```bash
+/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm install
+```
+
+### `page.evaluate: Target page, context or browser has been closed`
+
+イメージ更新漏れがある可能性があります。`--build` を付けて再実行してください。
+
+```bash
+HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --build --rm law-scraper --law-id 334AC0000000121
+```
+
+## 補足: ローカル実行（オプション）
+
+Docker を使えない環境向けです。通常は Docker 実行を優先してください。
+
+```bash
+/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm install
+/home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm build
+node dist/cli.js --build-dictionary
+node dist/cli.js --law-id 334AC0000000121
+```
