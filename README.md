@@ -118,6 +118,17 @@ Docker E2E（2回実行して出力差分確認）:
 /home/yuki/.local/share/mise/installs/pnpm/10.30.0/pnpm test:e2e:docker
 ```
 
+## 補助ツール（`tools/`）
+
+`tools/` は本体CLIのエントリポイントではなく、開発/検証用の補助スクリプト置き場です。
+
+- `tools/e2e_docker.sh`
+  - Dockerで同一入力を2回実行し、出力差分の有無を検証
+- `tools/poc_fetch_law.mjs`
+  - Playwrightで法令ページを取得し、PoC用ダンプを保存
+- `tools/poc_fetch_law.ts`
+  - 上記PoCのTypeScript版
+
 ## トラブルシュート（Docker）
 
 ### `law_<id>.md` の名前になる

@@ -7,8 +7,8 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "start": "node dist/cli.js",
     "test": "pnpm build && node --test dist/**/*.test.js",
-    "test:e2e:docker": "bash scripts/e2e_docker.sh",
-    "poc": "node scripts/poc_fetch_law.mjs"
+    "test:e2e:docker": "bash tools/e2e_docker.sh",
+    "poc": "node tools/poc_fetch_law.mjs"
   },
   "dependencies": {
     "playwright": "^1.58.2"

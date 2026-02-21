@@ -9,7 +9,7 @@ API利用は法令名から `law_id` を取得する用途に限定する。
 
 ## 実測で確認済みの事実（PoC）
 
-- 実行スクリプト: `scripts/poc_fetch_law.mjs`
+- 実行スクリプト: `tools/poc_fetch_law.mjs`
 - 対象法令: `334AC0000000121`（特許法）
 - ダンプ保存先:
   1. `data/scrape_dumps/334AC0000000121/page.html`
